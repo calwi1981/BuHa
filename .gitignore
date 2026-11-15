@@ -1,0 +1,73 @@
+# Zugangsdaten und produktive Konfiguration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+secrets/
+credentials/
+
+# Produktive Daten und Rechnungen
+data/
+storage/
+uploads/
+backups/
+*.sql
+*.sql.gz
+*.dump
+*.backup
+*.sqlite
+*.sqlite3
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Node.js / Frontend
+node_modules/
+dist/
+build/
+.next/
+coverage/
+
+# Entwicklungsumgebung
+.idea/
+.vscode/
+*.swp
+*.log
+
+# Betriebssystem
+.DS_Store
+Thumbs.db
+importers/dolibarr/
+data/dolibarr_import/
+
+# BUHA - lokale Entwicklungs- und Sicherungsdateien
+*.bak
+*.bak-*
+*.bak_*
+*.backup_*
+*.pre_*
+*.pre[0-9]*
+*.defekt_gesichert_*
+*.orig
+*.rej
+
+# Externe XRechnung-Validator-Komponenten
+# Werden nicht im BUHA-Quellcode-Repository veröffentlicht
+tools/xrechnung-validator/
+
+# Production-specific Docker configuration
+/compose.yaml
+/compose.smtp.yaml
+/compose.xrechnung.yaml
+
+# Local one-time data import
+/importers/

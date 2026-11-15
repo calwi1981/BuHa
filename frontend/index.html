@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BUHA – Buchhaltung</title>
+<link rel="stylesheet" href="/static/style.css?v=20261115-443">
+</head>
+<body>
+<div id="login" class="login-screen">
+  <form id="login-form" class="login-card">
+    <div class="brand">BUHA<span>.</span></div>
+    <img class="company-logo login-logo hidden"
+         alt="Firmenlogo">
+    <h1>Anmeldung</h1>
+    <p>Buchhaltung · Rechnungen · EÜR</p>
+    <label>Benutzername<input id="username" autocomplete="username" required></label>
+    <label>Passwort<input id="password" type="password" autocomplete="current-password" required></label>
+    <button type="submit">Anmelden</button>
+    <div id="login-error" class="error"></div>
+  </form>
+</div>
+
+<div id="application" class="app hidden">
+  <aside class="sidebar">
+    <div class="brand">BUHA<span>.</span></div>
+    <img class="company-logo sidebar-logo hidden"
+         alt="Firmenlogo">
+    <div class="sidebar-caption">BUCHHALTUNG</div>
+    <nav id="navigation">
+      <button data-page="dashboard" class="active">Übersicht</button>
+      <button data-page="invoices">Rechnungen</button>
+      <button data-page="recurringInvoices">Wiederkehrende Rechnungen</button>
+      <button data-page="products">Produkte & Leistungen</button>
+      <button data-page="partners">Kunden & Lieferanten</button>
+
+      <button data-page="journal">Monatsjournal</button>
+      <button data-page="eur">EÜR</button>
+      <button data-page="administration" id="admin-nav" class="hidden">Administration</button>
+    </nav>
+    <div class="buha-version" style="font-size:11px;padding:12px 16px;opacity:.7;">BUHA v<span id="buha-app-version">1.0.0</span><div>© 2026 calwi.de - Markus A. Bross</div></div>
+<div class="sidebar-bottom">
+      <div id="current-user"></div>
+      <button id="logout" class="secondary">Abmelden</button>
+    </div>
+  </aside>
+
+  <main class="main">
+    <header class="topbar">
+      <div>
+        <div class="eyebrow">BUHA / VERWALTUNG</div>
+        <h1 id="page-title">Übersicht</h1>
+      </div>
+
+    </header>
+    <div id="notice" class="notice hidden"></div>
+    <section id="content"></section>
+  </main>
+</div>
+
+<script src="/static/xrechnung-import.js?v=20261114-349" defer></script>
+<script src="/static/app.js?v=20261115-440" defer></script>
+<script src="/static/invoice-mail.js"></script>
+<script>
+(async function () {
+  try {
+    const response = await fetch("/version", {cache: "no-store"});
+    if (!response.ok) return;
+    const data = await response.json();
+    if (typeof data.version !== "string") return;
+    const target = document.getElementById("buha-app-version");
+    if (target) target.textContent = data.version;
+  } catch (_) {}
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,489 @@
+"""BUHA-Rechnungs-PDF im Layout der Dolibarr-Referenz."""
+from collections import defaultdict
+from decimal import Decimal
+from io import BytesIO
+
+import qrcode
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.utils import ImageReader
+from reportlab.pdfgen import canvas
+
+
+class NumberedCanvas(canvas.Canvas):
+    """Ermittelt die Gesamtseitenzahl vor der finalen Ausgabe."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._saved_pages = []
+
+    def showPage(self):
+        self._saved_pages.append(dict(self.__dict__))
+        self._startPage()
+
+    def save(self):
+        total = len(self._saved_pages) + 1
+        self._saved_pages.append(dict(self.__dict__))
+        for state in self._saved_pages:
+            self.__dict__.update(state)
+            self.setFillColor(colors.HexColor("#171b42"))
+            self.setFont("Helvetica", 7)
+            self.drawRightString(
+                A4[0] - 30, 14,
+                f"Seite {self._pageNumber}/{total}"
+            )
+            super().showPage()
+        super().save()
+
+NAVY = colors.HexColor("#171b42")
+GRAY = colors.HexColor("#777777")
+LIGHT = colors.HexColor("#e8e8ed")
+W, H = A4
+LEFT, RIGHT = 30, W - 30
+
+
+def money(value):
+    return (
+        f"{Decimal(str(value or 0)):,.2f}"
+        .replace(",", "X").replace(".", ",").replace("X", ".")
+    )
+
+
+def number(value):
+    value = Decimal(str(value or 0))
+    return format(value.normalize(), "f")
+
+
+def txt(value):
+    return str(value or "").replace("\r", "").replace("\t", " ")
+
+
+def draw(c, x, y, value, size=8, bold=False, right=False,
+         color=NAVY):
+    c.setFillColor(color)
+    c.setFont("Helvetica-Bold" if bold else "Helvetica", size)
+    method = c.drawRightString if right else c.drawString
+    method(x, y, txt(value))
+
+
+def wrapped(c, value, x, y, width, size=8, leading=11,
+            bold=False, max_y=None):
+    font = "Helvetica-Bold" if bold else "Helvetica"
+    for paragraph in txt(value).split("\n"):
+        words = paragraph.split()
+        if not words:
+            y -= leading
+            continue
+        current = ""
+        for word in words:
+            candidate = (current + " " + word).strip()
+            if c.stringWidth(candidate, font, size) > width and current:
+                if max_y is not None and y < max_y:
+                    return y
+                draw(c, x, y, current, size, bold)
+                y -= leading
+                current = word
+            else:
+                current = candidate
+        if current:
+            if max_y is not None and y < max_y:
+                return y
+            draw(c, x, y, current, size, bold)
+            y -= leading
+    return y
+
+
+def qr_image(settings, invoice):
+    iban = "".join(txt(settings.get("iban")).split())
+    bic = "".join(txt(settings.get("bic")).split())
+    holder = txt(
+        settings.get("bank_holder") or settings.get("company_name")
+    )
+    if not iban or not holder:
+        return None
+    payload = "\n".join([
+        "BCD", "002", "1", "SCT", bic, holder[:70],
+        iban, f"EUR{Decimal(str(invoice.gross_total)):.2f}",
+        "", "", txt(invoice.invoice_number)[:140], ""
+    ])
+    qr = qrcode.QRCode(
+        error_correction=qrcode.constants.ERROR_CORRECT_M,
+        box_size=5, border=2
+    )
+    qr.add_data(payload)
+    qr.make(fit=True)
+    image = qr.make_image(fill_color="black", back_color="white")
+    output = BytesIO()
+    image.save(output, format="PNG")
+    output.seek(0)
+    return output
+
+
+def render_invoice_pdf(invoice, partner, lines, payments,
+                       settings, logo=None):
+    output = BytesIO()
+    c = NumberedCanvas(output, pagesize=A4)
+    c.setTitle(f"Rechnung {invoice.invoice_number}")
+
+    company = txt(settings.get("company_name"))
+    street = txt(settings.get("street"))
+    place = " ".join(filter(None, [
+        txt(settings.get("postal_code")),
+        txt(settings.get("city"))
+    ]))
+    recipient_place = " ".join(filter(None, [
+        txt(partner.postal_code), txt(partner.city)
+    ]))
+
+    paid = sum(
+        (Decimal(str(p.amount)) for p in payments),
+        Decimal("0")
+    )
+    balance = Decimal(str(invoice.gross_total)) - paid
+
+    def footer(page):
+        c.setStrokeColor(LIGHT)
+        c.setLineWidth(0.5)
+        c.line(30, 60, W - 30, 60)
+        lines_footer = [
+            "Firmensitz: " + " - ".join(filter(None, [
+                company, street, place,
+                txt(settings.get("country"))
+            ])),
+            " - ".join(filter(None, [
+                "Telefon: " + txt(settings.get("phone"))
+                if settings.get("phone") else "",
+                "Fax: " + txt(settings.get("fax"))
+                if settings.get("fax") else "",
+                txt(settings.get("website")),
+                txt(settings.get("email"))
+            ])),
+            " - ".join(filter(None, [
+                "Steuernummer: " + txt(settings.get("tax_number"))
+                if settings.get("tax_number") else "",
+                "USt-IdNr.: " + txt(settings.get("vat_id"))
+                if settings.get("vat_id") else ""
+            ])),
+            txt(settings.get("invoice_footer"))
+        ]
+        y = 49
+        for line in lines_footer:
+            if line:
+                font = "Helvetica"
+                size = 6.2
+                while c.stringWidth(line, font, size) > W - 90 and size > 4.5:
+                    size -= 0.2
+                c.setFont(font, size)
+                c.setFillColor(NAVY)
+                c.drawCentredString(W / 2, y, line)
+                y -= 9
+        # Seitenangabe wird beim Speichern ergänzt.
+
+    def heading(first_page=True):
+        if first_page:
+            if logo:
+                try:
+                    reader = ImageReader(BytesIO(logo))
+                    iw, ih = reader.getSize()
+                    scale = min(166 / iw, 61 / ih)
+                    c.drawImage(
+                        reader, LEFT, H - 78,
+                        width=iw * scale,
+                        height=ih * scale,
+                        preserveAspectRatio=True,
+                        mask="auto"
+                    )
+                except Exception:
+                    pass
+
+            draw(c, RIGHT, H - 29,
+                 f"Rechnung {invoice.invoice_number}",
+                 13, True, True)
+            draw(c, RIGHT, H - 55,
+                 "Rechnungsdatum : "
+                 + invoice.invoice_date.strftime("%d.%m.%Y"),
+                 7.4, right=True)
+            if invoice.due_date:
+                draw(c, RIGHT, H - 66,
+                     "Fälligkeitsdatum : "
+                     + invoice.due_date.strftime("%d.%m.%Y"),
+                     7.4, right=True)
+            draw(c, RIGHT, H - 77,
+                 "Kundennummer : " + txt(partner.partner_number),
+                 7.4, right=True)
+
+            draw(c, 40, H - 116, partner.name, 9, True)
+            draw(c, 40, H - 129, partner.street, 8)
+            draw(c, 40, H - 141, recipient_place, 8)
+            if partner.notes:
+                wrapped(c, partner.notes, 40, H - 164,
+                        250, 7.5, 10, max_y=H - 207)
+
+            draw(c, 365, H - 116, company, 9, True)
+            draw(c, 365, H - 129, street, 8)
+            draw(c, 365, H - 141, place, 8)
+
+            contact = []
+            if settings.get("phone"):
+                contact.append("Tel.: " + txt(settings["phone"]))
+            if settings.get("fax"):
+                contact.append("Fax: " + txt(settings["fax"]))
+            contact_y = H - 156
+            for entry in contact:
+                draw(c, 365, contact_y, entry, 7.4)
+                contact_y -= 12
+            if settings.get("website"):
+                draw(c, 365, contact_y,
+                     "Internet: " + txt(settings["website"]), 7.4)
+                contact_y -= 12
+            if settings.get("email"):
+                draw(c, 365, contact_y,
+                     "E-Mail: " + txt(settings["email"]), 7.4)
+
+            qr = qr_image(settings, invoice)
+            if qr:
+                c.drawImage(
+                    ImageReader(qr), 30, H - 306,
+                    width=84, height=84
+                )
+                draw(c, 124, H - 250,
+                     "Girocode/EPC-QR-Code", 6.6)
+                wrapped(
+                    c,
+                    "Scannen Sie diesen QR-Code mit Ihrer "
+                    "Banking-App, um die SEPA-Überweisung "
+                    "bequem auszuführen.",
+                    124, H - 263, 145, 6.3, 8
+                )
+            return H - 331
+
+        draw(c, 30, H - 37,
+             f"Rechnung {invoice.invoice_number} – Fortsetzung",
+             10, True)
+        return H - 62
+
+    cols = [30, 282, 329, 393, 436, 503, W - 30]
+    headers = [
+        "Beschreibung", "USt.", "EP (netto)",
+        "Anz.", "Nettosumme", "Gesamt (inkl. USt)"
+    ]
+
+    def table_header(y):
+        draw(c, LEFT, y + 10,
+             "Alle Beträge in Euro", 7, right=False)
+        c.setStrokeColor(GRAY)
+        c.setLineWidth(0.45)
+        c.rect(LEFT, y - 19, RIGHT - LEFT, 20, stroke=1, fill=0)
+        for x in cols[1:-1]:
+            c.line(x, y + 1, x, y - 19)
+        for i, name in enumerate(headers):
+            if i == 0:
+                draw(c, cols[i] + 4, y - 12, name, 7)
+            else:
+                size = 5.8 if i == 5 else 6.5
+                draw(c, cols[i + 1] - 4, y - 12,
+                     name, size, right=True)
+        return y - 19
+
+    def table_segment(y, height):
+        c.setStrokeColor(GRAY)
+        c.setLineWidth(0.45)
+        c.line(LEFT, y, RIGHT, y)
+        c.line(LEFT, y - height, RIGHT, y - height)
+        c.line(LEFT, y, LEFT, y - height)
+        c.line(RIGHT, y, RIGHT, y - height)
+        for x in cols[1:-1]:
+            c.line(x, y, x, y - height)
+
+    def line_height(line):
+        desc = txt(line.description)
+        approx_lines = sum(
+            max(1, (len(part) + 47) // 48)
+            for part in desc.split("\n")
+        )
+        discount = Decimal(str(getattr(line, "discount_value", 0) or 0))
+        return max(31, 9 + approx_lines * 10 + (11 if discount > 0 else 0))
+
+    y = heading()
+    y = table_header(y)
+    page = 1
+    position_y = y
+
+    for line in lines:
+        needed = line_height(line)
+        if getattr(line, "_pdf_product_label", ""):
+            needed += 13
+        if y - needed < 245:
+            table_segment(position_y, max(0, position_y - y))
+            footer(page)
+            c.showPage()
+            page += 1
+            y = table_header(heading(False))
+            position_y = y
+
+        product_label = getattr(line, "_pdf_product_label", "")
+        if product_label:
+            draw(c, cols[0] + 4, y - 13,
+                 product_label, 7.8, bold=True)
+            description_start = y - 24
+        else:
+            description_start = y - 13
+
+        description_parts = txt(line.description).split("\n", 1)
+        desc_y = wrapped(
+            c, description_parts[0], cols[0] + 4, description_start,
+            cols[1] - cols[0] - 9, 7.8, 10,
+            bold=False, max_y=y - needed + 3
+        )
+        if len(description_parts) > 1:
+            desc_y = wrapped(
+                c, description_parts[1], cols[0] + 4,
+                desc_y, cols[1] - cols[0] - 9,
+                7.8, 10, max_y=y - needed + 3
+            )
+        discount = Decimal(str(
+            getattr(line, "discount_value", 0) or 0
+        ))
+        if discount > 0:
+            dtype = getattr(line, "discount_type", "none")
+            suffix = "%" if dtype == "percent" else "EUR"
+            draw(c, cols[0] + 4, desc_y - 1,
+                 f"Rabatt: {money(discount)} {suffix}", 7)
+
+        vals = [
+            f"{number(line.vat_rate)}%",
+            money(line.unit_net_price),
+            number(line.quantity),
+            money(line.net_total),
+            money(line.gross_total)
+        ]
+        for i, value in enumerate(vals, 1):
+            draw(c, cols[i + 1] - 3, y - 13,
+                 value, 7.4, right=True)
+        y -= needed
+
+    # Wie in der Referenz: hoher Positionsrahmen,
+    # soweit der verbleibende Platz dies erlaubt.
+    if page == 1:
+        target_bottom = 267
+        if y > target_bottom:
+            y = target_bottom
+
+    table_segment(position_y, max(0, position_y - y))
+
+    # Auf Folgeseiten wird der Summenblock separat ausgegeben.
+    if y < 218:
+        footer(page)
+        c.showPage()
+        page += 1
+        y = H - 70
+
+    summary_top = y - 15
+    left_x = 32
+    right_x = 358
+
+    # Umsatzsteuer nach Steuersatz zusammenfassen.
+    taxes = defaultdict(lambda: [Decimal("0"), Decimal("0")])
+    for line in lines:
+        key = Decimal(str(line.vat_rate))
+        taxes[key][0] += Decimal(str(line.net_total))
+        taxes[key][1] += Decimal(str(line.vat_total))
+
+    tax_columns = [
+        (left_x, "USt.", False),
+        (125, "Nettosumme", True),
+        (218, "USt.-Betrag", True),
+        (318, "Gesamtbetrag", True)
+    ]
+    for x, label, right_align in tax_columns:
+        draw(c, x, summary_top, label, 6.8,
+             bold=True, right=right_align)
+
+    tax_y = summary_top - 13
+    for rate, (net, tax) in sorted(taxes.items()):
+        draw(c, left_x, tax_y, f"{number(rate)}%", 7)
+        draw(c, 125, tax_y, money(net), 7, right=True)
+        draw(c, 218, tax_y, money(tax), 7, right=True)
+        draw(c, 318, tax_y, money(net + tax), 7, right=True)
+        tax_y -= 12
+
+    totals = [
+        ("Nettosumme", invoice.net_total),
+        ("USt. gesamt", invoice.vat_total),
+        ("Bruttosumme", invoice.gross_total)
+    ]
+    sy = summary_top
+    for label, value in totals:
+        if label == "Bruttosumme":
+            c.setFillColor(LIGHT)
+            c.rect(right_x - 2, sy - 4, RIGHT - right_x + 2,
+                   12, stroke=0, fill=1)
+        draw(c, right_x, sy, label, 7.6,
+             label == "Bruttosumme")
+        draw(c, RIGHT, sy, money(value), 7.6,
+             label == "Bruttosumme",
+             right=True)
+        sy -= 13
+
+    bank_y = tax_y - 12
+    if invoice.due_date:
+        days = (invoice.due_date - invoice.invoice_date).days
+        draw(c, left_x, bank_y,
+             f"Zahlungsbedingungen: {days} Tage", 7)
+        bank_y -= 18
+
+    if any(settings.get(k) for k in
+           ("bank_name", "bank_holder", "iban", "bic")):
+        draw(c, left_x, bank_y,
+             "Zahlung per Überweisung bitte auf folgendes Konto:",
+             7, True)
+        bank_y -= 13
+        for label, key in [
+            ("Bank", "bank_name"),
+            ("Kontoinhaber", "bank_holder"),
+            ("IBAN", "iban"),
+            ("BIC / SWIFT-Code", "bic")
+        ]:
+            if settings.get(key):
+                draw(c, left_x, bank_y,
+                     f"{label}: {settings[key]}", 6.8,
+                     key in {"iban", "bic"})
+                bank_y -= 10
+
+    if payments:
+        py = sy - 12
+        draw(c, right_x, py, "Bereits getätigte Zahlungen", 7, True)
+        py -= 13
+        draw(c, right_x, py, "Zahlung", 6.5, True)
+        draw(c, right_x + 115, py, "Betrag",
+             6.5, True, right=True)
+        draw(c, right_x + 123, py, "Typ", 6.5, True)
+        draw(c, RIGHT, py, "Num", 6.5, True, right=True)
+        py -= 12
+        for payment in payments:
+            if py < 78:
+                footer(page)
+                c.showPage()
+                page += 1
+                py = H - 55
+            draw(c, right_x, py,
+                 payment.payment_date.strftime("%d.%m.%Y"), 6.4)
+            draw(c, right_x + 115, py,
+                 money(payment.amount), 6.4, right=True)
+            draw(c, right_x + 123, py,
+                 payment.payment_method, 6.4)
+            if payment.reference:
+                draw(c, RIGHT, py,
+                     txt(payment.reference)[:13],
+                     5.8, right=True)
+            py -= 12
+
+    if invoice.notes:
+        note_y = min(bank_y - 14, 118)
+        if note_y > 72:
+            wrapped(c, invoice.notes, left_x, note_y,
+                    300, 7, 9, max_y=68)
+
+    footer(page)
+    c.save()
+    return output.getvalue()

@@ -1,0 +1,48 @@
+importers/dolibarr/
+
+# BUHA - vertrauliche Konfiguration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+secrets/
+credentials/
+
+# Daten und Sicherungen
+data/
+storage/
+uploads/
+backups/
+*.sql
+*.sql.gz
+*.dump
+*.backup
+*.sqlite
+*.sqlite3
+
+# Lokale Entwicklungsdateien
+.git/
+.github/
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+node_modules/
+*.log
+*.bak
+*.bak-*
+*.bak_*
+*.backup_*
+*.pre_*
+*.pre[0-9]*
+*.defekt_gesichert_*
+*.orig
+*.rej
+
+# Externe Komponenten
+tools/xrechnung-validator/
+importers/dolibarr/

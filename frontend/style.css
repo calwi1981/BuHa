@@ -1,0 +1,326 @@
+:root{font-family:Inter,system-ui,-apple-system,"Segoe UI",sans-serif;color:#19253b;background:#f5f7fb}
+*{box-sizing:border-box}body{margin:0}button,input,select,textarea{font:inherit}
+button{cursor:pointer;border:0;border-radius:9px;padding:11px 17px;background:#2459d3;color:white;font-weight:600}
+button:hover{filter:brightness(.95)}button.secondary{background:#e9eef8;color:#263c65}
+button.danger{background:#b43e43}button.small{padding:6px 11px;font-size:12px}
+.hidden{display:none!important}.brand{font-size:29px;font-weight:850;letter-spacing:-1.4px}
+.brand span{color:#3f81ff}.login-screen{min-height:100vh;display:grid;place-items:center;padding:20px}
+.login-card{width:min(420px,100%);padding:38px;background:white;border-radius:18px;box-shadow:0 20px 60px #20345b16}
+.login-card h1{margin:32px 0 4px}.login-card p{color:#71809b;margin-bottom:26px}
+label{display:block;font-size:13px;font-weight:650;margin:12px 0}
+input,select,textarea{width:100%;margin-top:7px;padding:11px 12px;border:1px solid #d5dce8;border-radius:8px;background:white;color:#1b2940}
+textarea{min-height:100px;resize:vertical}input:focus,textarea:focus,select:focus{outline:2px solid #9ab8ff}
+.login-card button{width:100%;margin-top:14px}.error{color:#b42333;margin-top:12px;font-size:13px}
+.app{display:flex;min-height:100vh}.sidebar{width:260px;background:#17243d;color:white;padding:28px 18px;display:flex;flex-direction:column;flex-shrink:0}
+.sidebar .brand{padding:0 14px}.sidebar-caption{color:#8393b2;font-size:10px;letter-spacing:2px;margin:48px 14px 13px}
+nav{display:grid;gap:5px}nav button{text-align:left;background:transparent;color:#b8c5da;font-weight:500;padding:13px 15px}
+nav button.active,nav button:hover{background:#293b5d;color:white}.sidebar-bottom{margin-top:auto;padding:20px 10px 0;color:#b8c5da;font-size:13px}
+.sidebar-bottom button{margin-top:15px;width:100%}.main{flex:1;min-width:0;padding:38px clamp(20px,4vw,65px)}
+.topbar{display:flex;justify-content:space-between;align-items:center;gap:16px;margin-bottom:30px}
+.eyebrow{font-size:11px;letter-spacing:2px;color:#8390a5}.topbar h1{font-size:29px;margin:6px 0}
+.status{border:1px solid #d7e0ed;background:white;padding:9px 13px;border-radius:25px;font-size:12px;color:#66758d}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:17px;margin-bottom:22px}
+.card,.panel{background:white;border:1px solid #e7ebf2;border-radius:14px;padding:22px;box-shadow:0 2px 8px #17243d05}
+.card .metric{font-size:30px;font-weight:760;margin-top:14px}.muted{color:#748199;font-size:13px}
+.panel{margin:18px 0}.panel h2{font-size:18px;margin:0 0 20px}.toolbar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:18px}
+.toolbar input,.toolbar select{width:auto;min-width:110px;margin:0}.table-wrap{overflow-x:auto}
+table{width:100%;border-collapse:collapse;text-align:left;font-size:13px}
+th{font-size:11px;text-transform:uppercase;letter-spacing:.7px;color:#71809a;background:#f8fafd}
+td,th{padding:13px 12px;border-bottom:1px solid #edf0f5}tr:last-child td{border:0}
+td.actions{white-space:nowrap}.pill{display:inline-block;padding:5px 9px;border-radius:20px;background:#edf2fc;color:#37518a;font-size:11px}
+.grid-form{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:8px 18px}
+.form-actions{margin-top:18px;display:flex;gap:10px}.notice{padding:13px 17px;border-radius:10px;background:#e9f1ff;color:#244b8c;margin-bottom:20px}
+.notice.bad{background:#fff0ef;color:#a53139}.wide{grid-column:1/-1}.right{text-align:right}
+@media(max-width:850px){.app{display:block}.sidebar{width:100%;padding:17px}.sidebar-caption{display:none}
+nav{display:flex;overflow:auto;margin-top:15px}nav button{white-space:nowrap}.sidebar-bottom{display:none}
+.main{padding:22px}.topbar{align-items:flex-start}.status{font-size:10px}}
+
+
+/* BUHA Rechnungspositionen */
+.invoice-section-title {
+ margin-top: 32px !important;
+ margin-bottom: 14px !important;
+}
+.invoice-lines {
+ min-width: 1180px;
+}
+.invoice-lines th {
+ white-space: nowrap;
+}
+.invoice-lines td {
+ vertical-align: middle;
+}
+.invoice-lines input,
+.invoice-lines select {
+ margin: 0;
+ min-width: 90px;
+}
+.invoice-lines .line-description {
+ min-width: 200px;
+}
+.invoice-lines .line-product {
+ min-width: 175px;
+}
+.invoice-lines .line-account {
+ min-width: 155px;
+}
+.invoice-lines .line-quantity,
+.invoice-lines .line-vat {
+ min-width: 75px;
+}
+.invoice-lines .line-net-result,
+.invoice-lines .line-gross-result {
+ white-space: nowrap;
+ font-weight: 600;
+}
+.invoice-line-toolbar {
+ margin-top: 18px;
+}
+.invoice-totals {
+ width: min(420px,100%);
+ margin: 20px 0 25px auto;
+ border: 1px solid #e1e7f1;
+ border-radius: 12px;
+ padding: 18px 22px;
+}
+.invoice-totals > div {
+ display: flex;
+ justify-content: space-between;
+ gap: 20px;
+ padding: 9px 0;
+}
+.invoice-totals .invoice-total {
+ margin-top: 10px;
+ padding-top: 18px;
+ border-top: 1px solid #d9e1ee;
+ font-size: 17px;
+}
+
+/* Administration: BCC-Rechnungsversand */
+.bcc-toggle {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 16px 0;
+  cursor: pointer;
+}
+
+.bcc-toggle input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+}
+
+.hint {
+  font-size: 0.9rem;
+  opacity: 0.75;
+  margin: 8px 0 18px;
+}
+
+/* Firmenlogo */
+.company-logo {
+  display: block;
+  object-fit: contain;
+  object-position: left center;
+}
+
+.sidebar-logo {
+  max-width: 195px;
+  max-height: 85px;
+  width: auto;
+  height: auto;
+  margin: 20px 14px 8px;
+  padding: 8px;
+  background: white;
+  border-radius: 8px;
+}
+
+.sidebar .sidebar-caption {
+  margin-top: 16px;
+}
+
+.login-logo {
+  max-width: 260px;
+  max-height: 110px;
+  width: auto;
+  height: auto;
+  margin: 22px 0 10px;
+}
+
+.login-card h1 {
+  margin-top: 24px;
+}
+
+.logo-preview {
+  min-height: 90px;
+  display: flex;
+  align-items: center;
+  margin: 14px 0;
+}
+
+.admin-logo {
+  max-width: 300px;
+  max-height: 130px;
+  padding: 12px;
+  border: 1px solid #dce3ed;
+  border-radius: 10px;
+  background: white;
+}
+
+/* Korrigierte Logo-Position */
+.sidebar-logo {
+  display: block;
+  max-width: 195px;
+  max-height: 85px;
+  margin: 16px 14px 8px;
+  padding: 6px;
+  background: #ffffff;
+  border-radius: 6px;
+}
+
+.sidebar-logo.hidden {
+  display: none;
+}
+
+.sidebar .sidebar-caption {
+  margin-top: 12px;
+  margin-bottom: 20px;
+}
+
+.login-logo {
+  max-width: 260px;
+  max-height: 110px;
+  margin: 20px 0 10px;
+}
+
+/* BUHA Dashboard 438 */
+.dashboard-three-cards{
+ grid-template-columns:repeat(3,minmax(0,1fr));
+}
+.dashboard-metric-note{
+ margin-top:8px;
+}
+.dashboard-invoice-link{
+ display:inline;
+ width:auto;
+ padding:0;
+ border:0;
+ border-radius:0;
+ background:transparent;
+ color:#2864ba;
+ font:inherit;
+ font-weight:600;
+ text-align:left;
+ text-decoration:underline;
+ text-underline-offset:3px;
+ cursor:pointer;
+}
+.dashboard-invoice-link:hover{
+ color:#17417c;
+ background:transparent;
+}
+.dashboard-top5{
+ padding-bottom:28px;
+}
+.dashboard-top5-row{
+ display:grid;
+ grid-template-columns:minmax(160px,1.3fr) minmax(100px,2fr) minmax(95px,auto);
+ gap:16px;
+ align-items:center;
+ margin:15px 0;
+}
+.dashboard-top5-name{
+ min-width:0;
+ overflow-wrap:anywhere;
+ font-size:14px;
+}
+.dashboard-top5-rank{
+ color:#748199;
+}
+.dashboard-top5-bar-track{
+ height:19px;
+ background:#edf2fa;
+ border-radius:6px;
+ overflow:hidden;
+}
+.dashboard-top5-bar{
+ height:100%;
+ background:#3f81ff;
+ border-radius:6px;
+}
+.dashboard-top5-value{
+ text-align:right;
+ font-weight:600;
+ white-space:nowrap;
+ font-size:13px;
+}
+@media(max-width:850px){
+ .dashboard-three-cards{
+  grid-template-columns:repeat(auto-fit,minmax(170px,1fr));
+ }
+ .dashboard-top5-row{
+  grid-template-columns:minmax(90px,1fr) minmax(90px,1fr);
+  gap:7px;
+ }
+ .dashboard-top5-value{
+  grid-column:2;
+ }
+}
+
+/* TOP 5 Kunden - Darstellung 440 */
+.dashboard-top5-v440{
+ display:grid;
+ gap:20px;
+ margin-top:24px;
+}
+.dashboard-top5-item{
+ display:grid;
+ gap:9px;
+}
+.dashboard-top5-header{
+ display:flex;
+ justify-content:space-between;
+ align-items:center;
+ gap:20px;
+}
+.dashboard-top5-customer{
+ display:flex;
+ align-items:baseline;
+ gap:10px;
+ min-width:0;
+ font-size:14px;
+ font-weight:600;
+ overflow-wrap:anywhere;
+}
+.dashboard-top5-position{
+ color:#748199;
+ font-weight:500;
+ flex-shrink:0;
+}
+.dashboard-top5-amount{
+ font-size:14px;
+ font-weight:700;
+ white-space:nowrap;
+ color:#24334d;
+}
+.dashboard-top5-track{
+ width:100%;
+ height:12px;
+ background:#edf2fa;
+ border-radius:999px;
+ overflow:hidden;
+}
+.dashboard-top5-fill{
+ height:100%;
+ border-radius:999px;
+ background:linear-gradient(90deg,#3f81ff,#78a8ff);
+}
+@media(max-width:600px){
+ .dashboard-top5-header{
+  align-items:flex-start;
+  gap:10px;
+ }
+ .dashboard-top5-customer,
+ .dashboard-top5-amount{
+  font-size:12px;
+ }
+}
