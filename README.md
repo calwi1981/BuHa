@@ -4,6 +4,30 @@ BUHA ist eine webbasierte Anwendung zur Rechnungsstellung und
 Buchhaltungsverwaltung. Sie kann auf einem eigenen Server mit
 Docker und PostgreSQL betrieben werden.
 
+## BUHA v1.2.0
+
+Version 1.2.0 erweitert BUHA um eine mandantenbezogene
+Buchhaltungsverwaltung.
+
+### Neue Funktionen
+
+- Mandantenverwaltung und mandantenbezogene Zugriffskontrolle
+- Globale Systemadministration und Benutzerverwaltung
+- Mandantenbezogene Stammdaten und Buchhaltungsdaten
+- Verwaltung mehrerer Zahlungskonten
+- Anfangssaldo und Anfangsdatum je Zahlungskonto
+- Umbuchungen zwischen Zahlungskonten
+- Manuelle Einnahmen- und Ausgabenbuchungen
+- Einnahmenueberschussrechnung (EÜR)
+- Nebenkostenabrechnung mit eigenen Rechnungsnummern
+- Erweiterte Rechnungs- und PDF-Funktionen
+
+Die bestehenden Funktionen zur Rechnungsstellung,
+Verwaltung wiederkehrender Rechnungen sowie
+XRechnung-Verarbeitung bleiben Bestandteil der Anwendung.
+
+Weitere Einzelheiten stehen im [CHANGELOG](CHANGELOG.md).
+
 ## Funktionen
 
 - Kunden- und Lieferantenverwaltung

@@ -8,7 +8,7 @@ from fastapi import APIRouter, File, HTTPException, UploadFile
 from fastapi.responses import Response
 from sqlalchemy import select
 
-from app.api.dependencies import CurrentUser, DatabaseSession
+from app.api.dependencies import TenantUser, DatabaseSession
 from app.models.invoice import Invoice
 from app.models.invoice_attachment import InvoiceAttachment
 
@@ -36,8 +36,8 @@ def attachment_metadata(item):
     }
 
 
-def load_outgoing_invoice(db, invoice_id, lock=False):
-    query = select(Invoice).where(Invoice.id == invoice_id)
+def load_outgoing_invoice(db, invoice_id, tenant_id, lock=False):
+    query = select(Invoice).where(Invoice.id == invoice_id, Invoice.tenant_id == tenant_id)
 
     if lock:
         query = query.with_for_update()
@@ -79,9 +79,9 @@ def attachments_locked(db, invoice_id):
 def list_invoice_attachments(
     invoice_id: int,
     db: DatabaseSession,
-    user: CurrentUser,
+    user: TenantUser,
 ):
-    load_outgoing_invoice(db, invoice_id)
+    load_outgoing_invoice(db, invoice_id, user.tenant_id)
 
     rows = db.scalars(
         select(InvoiceAttachment)
@@ -102,10 +102,10 @@ def list_invoice_attachments(
 async def upload_invoice_attachment(
     invoice_id: int,
     db: DatabaseSession,
-    user: CurrentUser,
+    user: TenantUser,
     file: UploadFile = File(...),
 ):
-    invoice = load_outgoing_invoice(db, invoice_id, lock=True)
+    invoice = load_outgoing_invoice(db, invoice_id, user.tenant_id, lock=True)
 
     if attachments_locked(db, invoice.id):
         raise HTTPException(
@@ -185,9 +185,9 @@ def download_invoice_attachment(
     invoice_id: int,
     attachment_id: int,
     db: DatabaseSession,
-    user: CurrentUser,
+    user: TenantUser,
 ):
-    load_outgoing_invoice(db, invoice_id)
+    load_outgoing_invoice(db, invoice_id, user.tenant_id)
 
     item = db.execute(
         select(InvoiceAttachment)
@@ -215,9 +215,9 @@ def delete_invoice_attachment(
     invoice_id: int,
     attachment_id: int,
     db: DatabaseSession,
-    user: CurrentUser,
+    user: TenantUser,
 ):
-    invoice = load_outgoing_invoice(db, invoice_id, lock=True)
+    invoice = load_outgoing_invoice(db, invoice_id, user.tenant_id, lock=True)
 
     if attachments_locked(db, invoice.id):
         raise HTTPException(

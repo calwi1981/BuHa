@@ -94,6 +94,15 @@ def wrapped(c, value, x, y, width, size=8, leading=11,
 
 
 def qr_image(settings, invoice):
+    if (
+        invoice.utility_period_from is not None
+        and (
+            invoice.utility_difference is None
+            or Decimal(str(invoice.utility_difference)) <= 0
+        )
+    ):
+        return None
+
     iban = "".join(txt(settings.get("iban")).split())
     bic = "".join(txt(settings.get("bic")).split())
     holder = txt(
@@ -103,7 +112,7 @@ def qr_image(settings, invoice):
         return None
     payload = "\n".join([
         "BCD", "002", "1", "SCT", bic, holder[:70],
-        iban, f"EUR{Decimal(str(invoice.gross_total)):.2f}",
+        iban, f"EUR{Decimal(str(invoice.utility_difference if invoice.utility_period_from is not None else invoice.gross_total)):.2f}",
         "", "", txt(invoice.invoice_number)[:140], ""
     ])
     qr = qrcode.QRCode(
@@ -119,8 +128,309 @@ def qr_image(settings, invoice):
     return output
 
 
+
+def render_utility_pdf(invoice, partner, lines, payments,
+                       settings, logo=None):
+    """Nebenkostenabrechnung mit vollständiger Umlagetabelle."""
+    output = BytesIO()
+    c = NumberedCanvas(output, pagesize=A4)
+    c.setTitle(f"Nebenkostenabrechnung {invoice.invoice_number}")
+
+    company = txt(settings.get("company_name"))
+    street = txt(settings.get("street"))
+    place = " ".join(filter(None, [
+        txt(settings.get("postal_code")),
+        txt(settings.get("city")),
+    ]))
+    recipient_place = " ".join(filter(None, [
+        txt(partner.postal_code), txt(partner.city)
+    ]))
+
+    paid = sum(
+        (Decimal(str(p.amount)) for p in payments),
+        Decimal("0")
+    )
+    difference = Decimal(str(invoice.utility_difference or 0))
+    total_cost = Decimal(str(invoice.utility_total_cost or 0))
+    prepayments = Decimal(str(invoice.utility_prepayments or 0))
+    balance = difference - paid
+
+    page = 1
+
+    def page_footer():
+        c.setStrokeColor(LIGHT)
+        c.line(LEFT, 61, RIGHT, 61)
+        draw(c, LEFT, 47, company, 7)
+        draw(c, LEFT, 36, " | ".join(filter(None, [
+            street, place, txt(settings.get("email"))
+        ])), 6.5)
+
+    def new_page():
+        nonlocal page
+        page_footer()
+        c.showPage()
+        page += 1
+        draw(c, LEFT, H - 42,
+             f"Nebenkostenabrechnung {invoice.invoice_number}",
+             11, True)
+        return H - 75
+
+    if logo:
+        try:
+            reader = ImageReader(BytesIO(logo))
+            iw, ih = reader.getSize()
+            scale = min(160 / iw, 60 / ih)
+            c.drawImage(reader, LEFT, H - 83,
+                        width=iw * scale, height=ih * scale,
+                        mask="auto")
+        except Exception:
+            pass
+
+    draw(c, RIGHT, H - 42, "NEBENKOSTENABRECHNUNG",
+         14, True, True)
+    draw(c, RIGHT, H - 60,
+         f"Nr. {invoice.invoice_number}", 8, right=True)
+    draw(c, RIGHT, H - 74,
+         f"Erstellt am {invoice.invoice_date:%d.%m.%Y}",
+         8, right=True)
+
+    draw(c, LEFT, H - 125, "ABRECHNUNGSEMPFÄNGER", 7, True)
+    draw(c, LEFT, H - 144, partner.name, 9, True)
+    draw(c, LEFT, H - 158, partner.street, 8)
+    draw(c, LEFT, H - 172, recipient_place, 8)
+
+    draw(c, 350, H - 125, "VERMIETER", 7, True)
+    draw(c, 350, H - 144, company, 9, True)
+    draw(c, 350, H - 158, street, 8)
+    draw(c, 350, H - 172, place, 8)
+
+    c.setFillColor(LIGHT)
+    c.roundRect(LEFT, H - 225, RIGHT - LEFT, 37,
+                5, fill=1, stroke=0)
+    draw(c, LEFT + 12, H - 204, "ABRECHNUNGSZEITRAUM",
+         7, True)
+    draw(c, LEFT + 12, H - 217,
+         f"{invoice.utility_period_from:%d.%m.%Y} - "
+         f"{invoice.utility_period_to:%d.%m.%Y}",
+         10, True)
+
+    cols = [LEFT, 233, 322, 403, 472, RIGHT]
+
+    def table_header(y):
+        c.setFillColor(NAVY)
+        c.roundRect(LEFT, y - 27, RIGHT - LEFT, 30,
+                    4, fill=1, stroke=0)
+        labels = [
+            ("Kostenart", LEFT + 8, False),
+            ("Gesamtkosten", cols[2] - 5, True),
+            ("Gesamtschlüssel", cols[3] - 5, True),
+            ("Ihr Schlüssel", cols[4] - 5, True),
+            ("Ihr Anteil", RIGHT - 7, True),
+        ]
+        for label, x, right in labels:
+            draw(c, x, y - 15, label, 7, True,
+                 right, colors.white)
+        return y - 31
+
+    y = table_header(H - 253)
+
+    for index, line in enumerate(lines):
+        description = txt(line.description)
+        words = description.split()
+        chunks = []
+        current = ""
+        for word in words:
+            candidate = (current + " " + word).strip()
+            if c.stringWidth(candidate, "Helvetica", 7.6) > 190 and current:
+                chunks.append(current)
+                current = word
+            else:
+                current = candidate
+        if current:
+            chunks.append(current)
+        if not chunks:
+            chunks = [""]
+
+        row_height = max(34, len(chunks) * 11 + 15)
+
+        if y - row_height < 245:
+            y = table_header(new_page())
+
+        if index % 2 == 0:
+            c.setFillColor(colors.HexColor("#f5f6f9"))
+            c.rect(LEFT, y - row_height,
+                   RIGHT - LEFT, row_height,
+                   fill=1, stroke=0)
+
+        for i, chunk in enumerate(chunks):
+            draw(c, LEFT + 8, y - 14 - i * 11,
+                 chunk, 7.6)
+
+        values = [
+            money(line.utility_total_cost),
+            number(line.utility_total_key),
+            number(line.utility_tenant_key),
+            money(line.net_total),
+        ]
+        for x, value in zip(
+            [cols[2] - 5, cols[3] - 5,
+             cols[4] - 5, RIGHT - 7],
+            values,
+        ):
+            draw(c, x, y - 14, value, 7.6,
+                 right=True)
+
+        y -= row_height
+
+    if y < 205:
+        y = new_page()
+
+    y -= 25
+    draw(c, LEFT, y, "ERGEBNIS DER ABRECHNUNG", 10, True)
+    y -= 15
+
+    rows = [
+        ("Summe Ihrer Nebenkostenanteile", total_cost),
+        ("Abzüglich geleisteter Vorauszahlungen", -prepayments),
+    ]
+
+    if difference > 0:
+        rows.append(("Nachzahlung", difference))
+    elif difference < 0:
+        rows.append(("Guthaben", -difference))
+    else:
+        rows.append(("Abrechnung ausgeglichen", Decimal("0")))
+
+    for index, (label, amount) in enumerate(rows):
+        if index == len(rows) - 1:
+            c.setFillColor(LIGHT)
+            c.roundRect(LEFT, y - 8, RIGHT - LEFT,
+                        25, 4, fill=1, stroke=0)
+        draw(c, LEFT + 8, y, label, 8.5,
+             index == len(rows) - 1)
+        draw(c, RIGHT - 8, y,
+             money(amount) + " EUR", 8.5,
+             index == len(rows) - 1, True)
+        y -= 31
+
+    if paid:
+        if y < 180:
+            y = new_page()
+        draw(c, LEFT + 8, y, "Bereits gebuchte Zahlungen", 8)
+        draw(c, RIGHT - 8, y, money(paid) + " EUR",
+             8, right=True)
+        y -= 20
+        draw(c, LEFT + 8, y,
+             "Noch zu zahlen" if balance > 0
+             else "Noch auszuzahlen" if balance < 0
+             else "Offener Saldo", 8, True)
+        draw(c, RIGHT - 8, y,
+             money(abs(balance)) + " EUR",
+             8, True, True)
+        y -= 28
+
+    if y < 175:
+        y = new_page()
+
+    if invoice.due_date:
+        draw(c, LEFT, y,
+             f"Zahlbar bis: {invoice.due_date:%d.%m.%Y}",
+             8, True)
+        y -= 20
+
+    if balance > 0:
+        draw(c, LEFT, y,
+             "Bitte überweisen Sie den noch offenen Betrag "
+             "auf folgendes Konto:", 8)
+        y -= 18
+    elif balance < 0:
+        draw(c, LEFT, y,
+             "Aus der Abrechnung ergibt sich ein "
+             "noch auszuzahlender Betrag.", 8)
+        y -= 18
+    else:
+        draw(c, LEFT, y,
+             "Die Abrechnung ist vollständig ausgeglichen.",
+             8, True)
+        y -= 18
+
+    # QR-Code links und Bankverbindung rechts in einem Block.
+    bank_fields = [
+        ("Bank", "bank_name"),
+        ("Kontoinhaber", "bank_holder"),
+        ("IBAN", "iban"),
+        ("BIC", "bic"),
+    ]
+    bank_rows = [
+        (label, txt(settings[key]))
+        for label, key in bank_fields
+        if settings.get(key)
+    ]
+
+    qr = None
+    if balance > 0:
+        qr_settings = dict(settings)
+        qr_invoice = type("QRInvoice", (), {
+            "utility_period_from": invoice.utility_period_from,
+            "utility_difference": balance,
+            "invoice_number": invoice.invoice_number,
+        })()
+        qr = qr_image(qr_settings, qr_invoice)
+
+    if qr or bank_rows:
+        block_height = max(
+            112 if qr else 0,
+            19 + len(bank_rows) * 17
+        )
+
+        if y - block_height < 75:
+            y = new_page()
+
+        block_top = y
+
+        if qr:
+            c.drawImage(
+                ImageReader(qr),
+                LEFT + 8,
+                block_top - 94,
+                width=88,
+                height=88
+            )
+            draw(
+                c, LEFT + 8, block_top - 106,
+                "SEPA-Zahlungs-QR-Code", 6.5
+            )
+
+        bank_x = LEFT + 132 if qr else LEFT + 8
+        bank_y = block_top - 13
+
+        for label, value in bank_rows:
+            draw(
+                c, bank_x, bank_y,
+                f"{label}: {value}", 8
+            )
+            bank_y -= 17
+
+        y = block_top - block_height - 12
+
+    if invoice.notes:
+        if y < 125:
+            y = new_page()
+        wrapped(c, invoice.notes, LEFT, y - 12,
+                RIGHT - LEFT, 7.5, 11, max_y=72)
+
+    page_footer()
+    c.save()
+    return output.getvalue()
+
+
 def render_invoice_pdf(invoice, partner, lines, payments,
                        settings, logo=None):
+    if invoice.utility_period_from is not None:
+        return render_utility_pdf(
+            invoice, partner, lines, payments, settings, logo
+        )
+
     output = BytesIO()
     c = NumberedCanvas(output, pagesize=A4)
     c.setTitle(f"Rechnung {invoice.invoice_number}")
@@ -139,7 +449,11 @@ def render_invoice_pdf(invoice, partner, lines, payments,
         (Decimal(str(p.amount)) for p in payments),
         Decimal("0")
     )
-    balance = Decimal(str(invoice.gross_total)) - paid
+    balance = Decimal(str(
+        invoice.utility_difference
+        if invoice.utility_period_from is not None
+        else invoice.gross_total
+    )) - paid
 
     def footer(page):
         c.setStrokeColor(LIGHT)
@@ -424,6 +738,50 @@ def render_invoice_pdf(invoice, partner, lines, payments,
              label == "Bruttosumme",
              right=True)
         sy -= 13
+
+    if invoice.utility_period_from is not None:
+        nk_cost = Decimal(str(invoice.utility_total_cost))
+        nk_advance = Decimal(str(invoice.utility_prepayments))
+        nk_difference = Decimal(str(invoice.utility_difference))
+
+        nk_rows = [
+            ("Nebenkosten gesamt", nk_cost),
+            ("Abzgl. Vorauszahlungen", -nk_advance),
+        ]
+
+        if nk_difference > 0:
+            nk_rows.append(("Nachzahlung", nk_difference))
+        elif nk_difference < 0:
+            nk_rows.append(("Guthaben", -nk_difference))
+        else:
+            nk_rows.append(("Ausgeglichen", Decimal("0")))
+
+        if balance > 0:
+            nk_rows.append(("Noch zu zahlen", balance))
+        elif balance < 0:
+            nk_rows.append(("Noch auszuzahlen", -balance))
+        else:
+            nk_rows.append(("Offener Saldo", Decimal("0")))
+
+        nk_y = min(tax_y - 24, sy - 18)
+
+        if nk_y - len(nk_rows) * 15 < 85:
+            footer(page)
+            c.showPage()
+            page += 1
+            nk_y = H - 90
+
+        draw(c, right_x, nk_y,
+             "Nebenkostenabrechnung", 8, True)
+        nk_y -= 17
+
+        for label, value in nk_rows:
+            draw(c, right_x, nk_y, label, 7)
+            draw(c, RIGHT, nk_y, money(value),
+                 7, right=True)
+            nk_y -= 15
+
+        tax_y = min(tax_y, nk_y - 8)
 
     bank_y = tax_y - 12
     if invoice.due_date:

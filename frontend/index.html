@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>BUHA – Buchhaltung</title>
-<link rel="stylesheet" href="/static/style.css?v=20261115-443">
+<link rel="stylesheet" href="/static/style.css?v=20261117-3">
 </head>
 <body>
 <div id="login" class="login-screen">
@@ -30,19 +30,36 @@
     <nav id="navigation">
       <button data-page="dashboard" class="active">Übersicht</button>
       <button data-page="invoices">Rechnungen</button>
+      <button data-page="bookings">Buchungen</button>
       <button data-page="recurringInvoices">Wiederkehrende Rechnungen</button>
       <button data-page="products">Produkte & Leistungen</button>
       <button data-page="partners">Kunden & Lieferanten</button>
 
       <button data-page="journal">Monatsjournal</button>
       <button data-page="eur">EÜR</button>
+      <div id="admin-menu" class="hidden">
+       <button type="button" id="admin-menu-toggle" aria-expanded="false">Administration ▾</button>
+       <div id="admin-submenu" class="hidden" style="padding-left:16px">
+        <button type="button" data-page="administration" data-admin-section="company">Firmendaten</button>
+        <button type="button" data-page="paymentAccounts">Zahlungskonten</button>
+        <button type="button" data-page="accounts">Buchungskonten</button>
+        <button type="button" data-page="administration" data-admin-section="mail">E-Mail-Einstellungen</button>
+        <button type="button" data-page="administration" data-admin-section="invoices">Rechnungseinstellungen</button>
+       </div>
+      </div>
       <button data-page="administration" id="admin-nav" class="hidden">Administration</button>
+<button data-page="systemAdministration" id="system-admin-nav" class="hidden">Systemadministration</button>
+       <button data-page="paymentAccounts" id="payment-accounts-nav" class="hidden">Zahlungskonten</button>
     </nav>
     <div class="sidebar-bottom">
-      <div id="current-user"></div>
+      <div class="tenant-selector-wrap hidden">
+       <label for="tenant-selector">Aktiver Mandant</label>
+       <select id="tenant-selector"></select>
+     </div>
+     <div id="current-user"></div>
       <button id="logout" class="secondary">Abmelden</button>
       <div class="buha-version" style="font-size:11px;padding:16px 0 0;opacity:.7;">
-        BUHA v<span id="buha-app-version">1.0.1</span>
+        BUHA v<span id="buha-app-version">1.2.0</span>
         <div>© 2026 calwi.de - Markus A. Bross</div>
       </div>
     </div>
@@ -62,7 +79,8 @@
 </div>
 
 <script src="/static/xrechnung-import.js?v=20261114-349" defer></script>
-<script src="/static/app.js?v=20261115-440" defer></script>
+<script src="/static/system-admin.js?v=20261117-2" defer></script>
+<script src="/static/app.js?v=20261118-530" defer></script>
 <script src="/static/invoice-mail.js"></script>
 <script>
 (async function () {

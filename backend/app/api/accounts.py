@@ -4,7 +4,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
-from app.api.dependencies import CurrentUser, DatabaseSession
+from app.api.dependencies import TenantUser, DatabaseSession
 from app.models.account import Account
 
 router = APIRouter(prefix="/api/accounts", tags=["Kontenplan"])
@@ -39,23 +39,23 @@ def serialize(item):
 
 
 @router.get("")
-def list_accounts(db: DatabaseSession, user: CurrentUser):
+def list_accounts(db: DatabaseSession, user: TenantUser):
     items = db.scalars(
-        select(Account).order_by(Account.number)
+        select(Account).where(Account.tenant_id == user.tenant_id).order_by(Account.number)
     ).all()
     return [serialize(item) for item in items]
 
 
 @router.get("/{item_id}")
-def get_account(item_id: int, db: DatabaseSession, user: CurrentUser):
-    item = db.get(Account, item_id)
+def get_account(item_id: int, db: DatabaseSession, user: TenantUser):
+    item = db.scalar(select(Account).where(Account.id == item_id, Account.tenant_id == user.tenant_id))
     if item is None:
         raise HTTPException(404, "Konto nicht gefunden.")
     return serialize(item)
 
 
 @router.post("", status_code=201)
-def create_account(data: AccountData, db: DatabaseSession, user: CurrentUser):
+def create_account(data: AccountData, db: DatabaseSession, user: TenantUser):
     if data.tax_treatment not in TAX_TREATMENTS:
         raise HTTPException(422, "Ungueltige Steuerbehandlung.")
     if data.account_type == "income" and data.tax_treatment == "input_vat":
@@ -65,7 +65,7 @@ def create_account(data: AccountData, db: DatabaseSession, user: CurrentUser):
     if data.account_type not in ACCOUNT_TYPES:
         raise HTTPException(422, "Ungueltige Kontoart.")
 
-    item = Account(**data.model_dump())
+    item = Account(tenant_id=user.tenant_id, **data.model_dump())
     db.add(item)
 
     try:
@@ -83,7 +83,7 @@ def update_account(
     item_id: int,
     data: AccountData,
     db: DatabaseSession,
-    user: CurrentUser,
+    user: TenantUser,
 ):
     if data.tax_treatment not in TAX_TREATMENTS:
         raise HTTPException(422, "Ungueltige Steuerbehandlung.")
@@ -94,7 +94,7 @@ def update_account(
     if data.account_type not in ACCOUNT_TYPES:
         raise HTTPException(422, "Ungueltige Kontoart.")
 
-    item = db.get(Account, item_id)
+    item = db.scalar(select(Account).where(Account.id == item_id, Account.tenant_id == user.tenant_id))
     if item is None:
         raise HTTPException(404, "Konto nicht gefunden.")
 

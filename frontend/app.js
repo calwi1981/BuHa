@@ -1,14 +1,35 @@
+// BUHA_ADMIN_NAV_342
+
+function updateRecurringVisibility(){
+ const tenant=(state.tenants||[]).find(t=>
+  Number(t.id)===Number(state.tenantId)
+ );
+ const isLandlord=tenant?.tenant_type==="vermieter";
+ document.querySelectorAll('[data-page="recurringInvoices"]')
+  .forEach(button=>{
+   button.hidden=isLandlord;
+   button.style.display=isLandlord?"none":"";
+  });
+}
+
 "use strict";
 const $=id=>document.getElementById(id);
-const state={page:"dashboard",user:null,editing:null,rows:[]};
+const state={page:"dashboard",user:null,editing:null,rows:[],tenants:[],tenantId:null,tenantRole:null};
 const titles={dashboard:"Übersicht",partners:"Kunden & Lieferanten",accounts:"Kontenplan",
- products:"Produkte & Leistungen",invoices:"Rechnungen",journal:"Monatsjournal",eur:"EÜR",administration:"Administration"};
+ products:"Produkte & Leistungen",invoices:"Rechnungen",bookings:"Buchungen",journal:"Monatsjournal",eur:"EÜR",administration:"Administration"};
 const esc=v=>String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const euro=v=>new Intl.NumberFormat("de-DE",{style:"currency",currency:"EUR"}).format(Number(v||0));
 const today=()=>new Date().toLocaleDateString("sv-SE");
 function notify(message,bad=false){const n=$("notice");n.textContent=message;n.className="notice"+(bad?" bad":"");}
 async function api(path,options={}){
- const response=await fetch(path,{credentials:"same-origin",headers:{"Content-Type":"application/json",...(options.headers||{})},...options});
+ const tenantHeader=state.tenantId&&!path.startsWith("/api/auth/")&&
+  !path.startsWith("/api/tenants/my")&&
+  !path.startsWith("/api/system/")
+  ?{"X-Tenant-ID":String(state.tenantId)}:{};
+ const response=await fetch(path,{credentials:"same-origin",
+  ...options,
+  headers:{"Content-Type":"application/json",...tenantHeader,...(options.headers||{})}
+ });
  if(response.status===401){showLogin();throw Error("Sitzung abgelaufen. Bitte anmelden.");}
  let data;try{data=await response.json();}catch{data={};}
  if(!response.ok)throw Error(typeof data.detail==="string"?data.detail:JSON.stringify(data.detail||data));
@@ -18,9 +39,11 @@ let companyLogoUrl = null;
 
 async function loadCompanyLogo(){
  try{
+  if(!state.tenantId)throw Error("Kein aktiver Mandant");
   const response = await fetch(
    "/api/administration/logo",
-   {credentials:"same-origin",cache:"no-store"}
+   {credentials:"same-origin",cache:"no-store",
+    headers:{"X-Tenant-ID":String(state.tenantId)}}
   );
 
   if(!response.ok)throw Error("Kein Logo");
@@ -51,30 +74,146 @@ async function loadCompanyLogo(){
 }
 
 function showLogin(){$("login").classList.remove("hidden");$("application").classList.add("hidden");}
+
+async function loadTenants(){
+ const result=await api("/api/tenants/my");
+ const tenants=Array.isArray(result)?result:
+  Array.isArray(result.tenants)?result.tenants:null;
+ if(!tenants)throw Error("Mandantenliste ungueltig.");
+
+ state.tenants=tenants;
+ const tenantStorageKey="buha.selectedTenant."+
+  String(state.user?.id??state.user?.username??"unknown");
+ let savedTenantId=null;
+ try{
+  savedTenantId=Number(localStorage.getItem(tenantStorageKey));
+ }catch{}
+ const available=id=>tenants.some(t=>Number(t.id)===Number(id));
+ if(!state.tenantId||!available(state.tenantId)){
+  state.tenantId=available(savedTenantId)
+   ?savedTenantId
+   :(tenants.length?Number(tenants[0].id):null);
+ }
+ if(state.tenantId){
+  try{localStorage.setItem(tenantStorageKey,String(state.tenantId));}catch{}
+ }
+ const active=tenants.find(t=>Number(t.id)===Number(state.tenantId));
+ state.tenantRole=active?.role||null;
+  updateRecurringVisibility();
+
+ const selector=$("tenant-selector");
+ if(selector){
+  selector.innerHTML=tenants.map(t=>
+   '<option value="'+Number(t.id)+'"'+
+   (Number(t.id)===state.tenantId?' selected':'')+'>'+
+   esc(t.name||t.code||("Mandant "+t.id))+'</option>'
+  ).join("");
+  selector.disabled=tenants.length<2;
+ }
+}
+
 function showApp(){
+ // BUHA_NAV_FIX_351
+ const activeTenant=(state.tenants||[]).find(t=>
+  Number(t.id)===Number(state.tenantId)
+ );
  loadCompanyLogo();
  $("login").classList.add("hidden");
  $("application").classList.remove("hidden");
  $("current-user").textContent=state.user?.username||"";
- $("admin-nav").classList.toggle(
-  "hidden",state.user?.role!=="admin"
+ const isSystemAdmin=state.user?.role==="system_admin";
+ document.querySelectorAll("#navigation [data-page]").forEach(button=>{
+  if(button.dataset.page!=="systemAdministration")
+   button.classList.toggle("hidden",isSystemAdmin);
+ });
+ $("system-admin-nav").classList.toggle("hidden",!isSystemAdmin);
+ const isTenantAdmin=!isSystemAdmin&&state.tenantRole==="admin";
+ $("admin-nav").classList.add("hidden");
+ $("payment-accounts-nav").classList.add("hidden");
+ setupAdminSubmenu();
+ const invoiceNav=document.querySelector(
+  '.sidebar button[data-page="invoices"]'
+ );
+ if(invoiceNav){
+  invoiceNav.textContent=
+   activeTenant?.tenant_type==="vermieter"
+    ? "NK-Abrechnungen" : "Rechnungen";
+ }
+ const selector=$("tenant-selector");
+ if(selector)selector.closest(".tenant-selector-wrap")?.classList.toggle(
+  "hidden",state.tenants.length===0
  );
 }
 $("login-form").onsubmit=async e=>{
  e.preventDefault();$("login-error").textContent="";
  try{
   const data=await api("/api/auth/login",{method:"POST",body:JSON.stringify({username:$("username").value,password:$("password").value})});
-  state.user=data.user;$("password").value="";showApp();await navigate("dashboard");
+  state.user=data.user;$("password").value="";
+  state.tenantId=null;
+  await loadTenants();
+  showApp();
+  if(state.user?.role==="system_admin")await navigate("systemAdministration");
+  else if(state.tenantId)await navigate("dashboard");
+  else $("content").innerHTML='<div class="panel">Keine Mandantenzuordnung vorhanden.</div>';
  }catch(err){$("login-error").textContent=err.message;}
 };
-$("logout").onclick=async()=>{try{await api("/api/auth/logout",{method:"POST"});}catch{}state.user=null;showLogin();};
-$("navigation").onclick=e=>{const b=e.target.closest("[data-page]");if(b)navigate(b.dataset.page);};
+$("logout").onclick=async()=>{
+ try{await api("/api/auth/logout",{method:"POST"});}catch{}
+ state.user=null;state.tenantId=null;state.tenantRole=null;state.tenants=[];
+ showLogin();
+};
+$("tenant-selector").onchange=async e=>{
+ const id=Number(e.target.value);
+ const tenant=state.tenants.find(t=>Number(t.id)===id);
+ if(!tenant)return;
+ state.tenantId=id;
+ state.tenantRole=tenant.role;
+ try{
+  localStorage.setItem(
+   "buha.selectedTenant."+
+   String(state.user?.id??state.user?.username??"unknown"),
+   String(id)
+  );
+ }catch{}
+  updateRecurringVisibility();
+ state.editing=null;
+ showApp();
+ await navigate("dashboard");
+};
+$("navigation").onclick=e=>{
+ const b=e.target.closest("[data-page]");
+ if(!b)return;
+ if(b.dataset.adminSection){
+  activeAdminSection=b.dataset.adminSection;
+ }
+ navigate(b.dataset.page);
+};
 async function navigate(page){
- state.page=page;state.editing=null;$("page-title").textContent=(page==="recurringInvoices"?"Wiederkehrende Rechnungen":titles[page]);
+ if(state.user?.role==="system_admin"&&page!=="systemAdministration")
+  page="systemAdministration";
+ if(state.user?.role!=="system_admin"&&page==="systemAdministration")
+  page="dashboard";
+
+ const activeTenant=(state.tenants||[]).find(t=>
+  Number(t.id)===Number(state.tenantId)
+ );
+ if(page==="recurringInvoices"&&
+    activeTenant?.tenant_type==="vermieter"){
+  page="invoices";
+ }
+ // BUHA_FINAL_NAV_354
+ state.page=page;
+ if(["administration","paymentAccounts","accounts"].includes(page)){
+  const submenu=$("admin-submenu");
+  const toggle=$("admin-menu-toggle");
+  if(submenu)submenu.classList.remove("hidden");
+  if(toggle)toggle.setAttribute("aria-expanded","true");
+ }
+ state.editing=null;$("page-title").textContent=(page==="invoices" && activeTenant?.tenant_type==="vermieter" ? "NK-Abrechnungen" : page==="recurringInvoices"?"Wiederkehrende Rechnungen":page==="paymentAccounts"?"Zahlungskonten":page==="systemAdministration"?"Systemadministration":titles[page]);
  document.querySelectorAll("[data-page]").forEach(b=>b.classList.toggle("active",b.dataset.page===page));
  $("notice").classList.add("hidden");$("content").innerHTML='<div class="panel">Lade Daten …</div>';
  try{await ({dashboard,partners:()=>master("partners"),accounts:()=>master("accounts"),
- products:()=>master("products"),invoices,recurringInvoices,journal,eur,administration})[page]();}
+ products:()=>master("products"),invoices,bookings,recurringInvoices,journal,eur,administration,paymentAccounts,systemAdministration})[page]();}
  catch(e){$("content").innerHTML='<div class="panel"></div>';notify(e.message,true);}
 }
 function table(headers,rows){
@@ -182,7 +321,177 @@ function editMaster(kind,item){
   }catch(err){notify(err.message,true);}
  };
 }
+async function bookings(){
+ const [bookingsData,paymentAccountsData,accountsData]=
+  await Promise.all([
+   api("/api/manual-bookings"),
+   api("/api/payment-accounts"),
+   api("/api/accounts")
+  ]);
+
+ if(!Array.isArray(bookingsData)||
+    !Array.isArray(paymentAccountsData)||
+    !Array.isArray(accountsData)){
+  throw new Error("Ungueltige Antwort der Buchungs-API.");
+ }
+
+ const paymentAccounts=paymentAccountsData.filter(a=>
+  a.is_active===true
+ );
+
+ const accounts=accountsData.filter(a=>
+  a.is_active===true&&
+  ["income","expense"].includes(a.account_type)
+ );
+
+ const canCreate=state.tenantRole==="admin";
+
+ const paymentNames=new Map(
+  paymentAccountsData.map(a=>[Number(a.id),a.name])
+ );
+
+ const accountNames=new Map(
+  accountsData.map(a=>[
+   Number(a.id),
+   String(a.number)+" - "+String(a.name)
+  ])
+ );
+
+ const rows=bookingsData.map(b=>{
+  const type=b.booking_type==="income"?"Einnahme":"Ausgabe";
+  return '<tr>'+
+   '<td>'+esc(b.booking_number)+'</td>'+
+   '<td>'+esc(b.booking_date)+'</td>'+
+   '<td>'+esc(type)+'</td>'+
+   '<td>'+esc(euro(b.amount))+'</td>'+
+   '<td>'+esc(paymentNames.get(Number(b.payment_account_id))||
+    ("Konto "+b.payment_account_id))+'</td>'+
+   '<td>'+esc(accountNames.get(Number(b.account_id))||
+    ("Konto "+b.account_id))+'</td>'+
+   '</tr>';
+ });
+
+ const paymentOptions=paymentAccounts.map(a=>[
+  String(a.id),a.name
+ ]);
+
+ const defaultPayment=paymentAccounts.find(a=>
+  a.is_default===true
+ )||paymentAccounts[0];
+
+ const canSubmit=paymentAccounts.length>0&&accounts.length>0;
+
+ $("content").innerHTML=
+  (canCreate?
+   '<div class="panel"><h2>Neue Buchung</h2>'+
+   '<form id="manual-booking-form">'+
+   '<div class="grid-form">'+
+   field("booking_type","Buchungsart","select","income",[
+    ["income","Einnahme"],
+    ["expense","Ausgabe"]
+   ])+
+   field("booking_date","Buchungsdatum","date",today())+
+   field("amount","Betrag (EUR)","number","")+
+   field("payment_account_id","Zahlungskonto","select",
+    defaultPayment?String(defaultPayment.id):"",paymentOptions)+
+   '<label>Buchungskonto<select name="account_id" '+
+   'id="manual-booking-account"></select></label>'+
+   '</div>'+
+   (!canSubmit?
+    '<p class="muted">Für neue Buchungen werden ein aktives '+
+    'Zahlungskonto und ein aktives Einnahmen- oder '+
+    'Ausgabenkonto benötigt.</p>':'')+
+   '<div class="form-actions"><button type="submit"'+
+   (!canSubmit?' disabled':'')+
+   '>Buchung speichern</button></div>'+
+   '</form></div>':'')+
+  '<div class="panel"><h2>Gespeicherte Buchungen</h2>'+
+  '<p class="muted">'+bookingsData.length+' Buchungen</p>'+
+  table(
+   ["Nummer","Datum","Art","Betrag","Zahlungskonto",
+    "Buchungskonto"],
+   rows
+  )+
+  '</div>';
+
+ if(!canCreate)return;
+
+ const form=$("manual-booking-form");
+ const typeField=form.elements.namedItem("booking_type");
+ const accountField=$("manual-booking-account");
+
+ function updateBookingAccounts(){
+  const expected=typeField.value;
+  const available=accounts.filter(a=>
+   a.account_type===expected
+  );
+
+  accountField.innerHTML=available.map(a=>
+   '<option value="'+Number(a.id)+'">'+
+   esc(a.number+" - "+a.name)+'</option>'
+  ).join("");
+
+  accountField.disabled=available.length===0;
+  form.querySelector('button[type="submit"]').disabled=
+   !canSubmit||available.length===0;
+ }
+
+ typeField.onchange=updateBookingAccounts;
+ updateBookingAccounts();
+
+ form.onsubmit=async event=>{
+  event.preventDefault();
+
+  const button=form.querySelector('button[type="submit"]');
+
+  try{
+   const data=Object.fromEntries(new FormData(form));
+   const amount=Number(data.amount);
+   const paymentId=Number(data.payment_account_id);
+   const accountId=Number(data.account_id);
+
+   if(!Number.isFinite(amount)||amount<=0){
+    throw new Error("Bitte einen positiven Betrag eingeben.");
+   }
+
+   if(!/^\d{4}-\d{2}-\d{2}$/.test(data.booking_date)){
+    throw new Error("Bitte ein gueltiges Buchungsdatum eingeben.");
+   }
+
+   if(!paymentAccounts.some(a=>Number(a.id)===paymentId)){
+    throw new Error("Bitte ein gueltiges Zahlungskonto auswaehlen.");
+   }
+
+   if(!accounts.some(a=>
+    Number(a.id)===accountId&&
+    a.account_type===data.booking_type
+   )){
+    throw new Error("Bitte ein passendes Buchungskonto auswaehlen.");
+   }
+
+   data.payment_account_id=paymentId;
+   data.account_id=accountId;
+   data.amount=amount;
+
+   button.disabled=true;
+
+   const saved=await api("/api/manual-bookings",{
+    method:"POST",
+    body:JSON.stringify(data)
+   });
+
+   await bookings();
+   notify("Buchung "+saved.booking_number+" gespeichert.");
+
+  }catch(err){
+   notify(err.message,true);
+   button.disabled=false;
+  }
+ };
+}
+
 async function dashboard(){
+ const isLandlord=state.tenants.find(t=>Number(t.id)===Number(state.tenantId))?.tenant_type==="vermieter";
  const now=new Date();
  const year=now.getFullYear();
  const month=now.getMonth()+1;
@@ -214,7 +523,7 @@ async function dashboard(){
  const invoiceRows=invoices.filter(i=>
   i.status==="draft"||
   (["open","partial"].includes(i.status)&&
-   Number(i.open_total)>0)
+   (Number(i.open_total)!==0||i.utility_period_from!=null))
  );
 
  const statusNames={
@@ -313,34 +622,38 @@ async function dashboard(){
 
  $("content").innerHTML=
   '<div class="cards dashboard-three-cards">'+
-   metric("Offene Rechnungen (unbezahlt)",outstanding.length)+
-   metric("Offener Rechnungsbetrag",euro(openAmount))+
+   metric(isLandlord?"Offene NK-Rechnungen (unbezahlt)":"Offene Rechnungen (unbezahlt)",outstanding.length)+
+   metric(isLandlord?"Offener NK-Rechnungsbetrag":"Offener Rechnungsbetrag",euro(openAmount))+
    metric(
-    "Kontostand",
+    "Gesamtbestand aller Zahlungskonten",
     bankAvailable?euro(bankBalance):"–",
-    bankAvailable
-     ?"Buchhalterischer Bankbestand"
-     :"Kein Bankanfangsbestand hinterlegt"
+    "Summe aller Zahlungskonten"
    )+
+  '</div>'+
+  // BUHA_ACCOUNT_BALANCE_DISPLAY_349
+  '<div class="panel"><h2>Einzelne Zahlungskonten</h2>'+
+  paymentAccountBalanceCards(journalData.payment_accounts)+
   '</div>'+
 
   '<div class="panel">'+
-   '<h2>Offene Rechnungen und Entwürfe</h2>'+
+   '<h2>'+(isLandlord?"Offene NK-Rechnungen und Entwürfe":"Offene Rechnungen und Entwürfe")+"</h2>"+
    (invoiceRows.length
     ?invoiceTable
     :'<p class="muted">Keine offenen Rechnungen oder Entwürfe.</p>')+
   '</div>'+
 
+  (isLandlord?'':
   '<div class="panel dashboard-top5">'+
    '<h2>TOP 5 Kunden – Umsatz</h2>'+
    '<p class="muted">Bruttoumsatz aus freigegebenen Ausgangsrechnungen, gesamt</p>'+
    topChart+
-  '</div>'+
+  '</div>')+
 
   '<div class="cards dashboard-three-cards">'+
-   metric("Kunden gesamt",customers)+
-   metric("Lieferanten gesamt",suppliers)+
-   metric("Produkte & Leistungen",products.length)+
+   metric(isLandlord?"Mieter gesamt":"Kunden gesamt",customers)+
+   (isLandlord?'':
+    metric("Lieferanten gesamt",suppliers)+
+    metric("Produkte & Leistungen",products.length))+
   '</div>';
 
  document.querySelectorAll("[data-dashboard-invoice]")
@@ -368,7 +681,12 @@ async function dashboard(){
   });
 }
 
+// BUHA_LANDLORD_LABELS_341
 async function invoices(){
+ // BUHA_INVOICE_TENANT_FIX_360
+ const activeTenant=(state.tenants||[]).find(t=>
+  Number(t.id)===Number(state.tenantId)
+ );
  const [rows,partners]=await Promise.all([
   api("/api/invoices"),api("/api/partners")
  ]);
@@ -403,13 +721,23 @@ async function invoices(){
    '</tr>';
  });
 
+ const isUtilityTenant=activeTenant?.tenant_type==="vermieter";
+
  $("content").innerHTML=
-  '<div class="toolbar"><button id="new-invoice">+ Rechnung erfassen</button><button type="button" class="secondary" id="import-xrechnung">XRechnung importieren</button>'+
-  '<span class="muted">'+rows.length+' Rechnungen</span></div>'+
+  '<div class="toolbar"><button id="new-invoice">'+
+  (isUtilityTenant?'+ NK-Abrechnung erstellen':'+ Rechnung erfassen')+
+  '</button>'+
+  (isUtilityTenant?'':'<button type="button" class="secondary" id="import-xrechnung">XRechnung importieren</button>')+
+  '<span class="muted">'+rows.length+
+  (isUtilityTenant?' NK-Abrechnungen':' Rechnungen')+
+  '</span></div>'+
   '<div id="invoice-editor"></div>'+
   '<div class="panel">'+
-  table(["Nummer","Datum","Art","Kunde / Lieferant","Status",
-   "Brutto","Bezahlt","Offen","Letzte Zahlung","Aktion"],body)+
+  table(isUtilityTenant
+   ?["NK-Nummer","Datum","Art","Mieter","Status",
+     "Mieteranteil","Bezahlt","Offen","Letzte Zahlung","Aktion"]
+   :["Nummer","Datum","Art","Kunde / Lieferant","Status",
+     "Brutto","Bezahlt","Offen","Letzte Zahlung","Aktion"],body)+
   '</div>';
 
  $("new-invoice").onclick=()=>{
@@ -418,7 +746,7 @@ async function invoices(){
  };
 
 
-  $("import-xrechnung").onclick=async()=>{
+  if($("import-xrechnung"))$("import-xrechnung").onclick=async()=>{
     try {
       await showXRechnungImport(partners);
       $("invoice-editor").scrollIntoView({
@@ -448,6 +776,10 @@ async function invoices(){
 }
 
 async function newInvoice(partners,existing=null){
+  const activeTenant=state.tenants.find(t=>
+   Number(t.id)===Number(state.tenantId)
+  );
+  const isUtilityTenant=activeTenant?.tenant_type==="vermieter";
  const editor=$("invoice-editor");
   const invoiceList=editor.nextElementSibling;
   if(invoiceList && invoiceList.classList.contains("panel")){
@@ -482,7 +814,7 @@ async function newInvoice(partners,existing=null){
 
  editor.innerHTML=`
  <div class="panel">
-  <h2>${existing?'Rechnungsentwurf bearbeiten':'Neue Rechnung'}</h2>
+  <h2>${isUtilityTenant?(existing?'NK-Abrechnung bearbeiten':'Neue NK-Abrechnung'):(existing?'Rechnungsentwurf bearbeiten':'Neue Rechnung')}</h2>
   <form id="invoice-form">
    <div class="grid-form">
     <div class="readonly-number">
@@ -496,6 +828,29 @@ async function newInvoice(partners,existing=null){
     ${field("invoice_date","Rechnungsdatum","date",today())}
     ${field("due_date","Fälligkeit","date","")}
     ${field("notes","Notizen","textarea")}
+     <div id="utility-options" style="grid-column:1/-1" hidden>
+      <h3>Nebenkostenabrechnung</h3>
+      <div class="grid-form">
+       ${field("utility_period_from","Abrechnungszeitraum von","date","")}
+       ${field("utility_period_to","Abrechnungszeitraum bis","date","")}
+       ${field("utility_prepayments","Vorauszahlungen (€)","number","0")}
+        ${field("utility_account_id","NK-Buchungskonto","select","",
+          accounts.filter(a=>
+           a.account_type==="income" &&
+           a.is_active===true
+          ).map(a=>[
+           String(a.id),
+           String(a.number)+" - "+String(a.name)
+          ]))}
+      </div>
+      <div id="utility-result">
+       <p>Mieteranteil: <strong id="utility-tenant-total">0,00 €</strong></p>
+       <p>Vorauszahlungen: <strong id="utility-advance-total">0,00 €</strong></p>
+       <p>Nachzahlung / Guthaben:
+        <strong id="utility-balance">0,00 €</strong>
+       </p>
+      </div>
+     </div>
     <div id="xrechnung-options" style="grid-column:1/-1">
      <label style="display:inline-flex;align-items:center;justify-content:flex-start;gap:8px;width:auto">
        <input type="checkbox" name="xrechnung_enabled"
@@ -518,6 +873,9 @@ async function newInvoice(partners,existing=null){
        <th>Einzelpreis netto</th>
        <th>Rabattart</th><th>Rabatt</th><th>USt %</th>
        <th>Buchungskonto</th>
+        ${isUtilityTenant
+         ?'<th>Umlage: Kosten / Schlüssel</th>'
+         :''}
        <th>Netto</th>
        <th>Brutto</th>
        <th></th>
@@ -564,7 +922,65 @@ async function newInvoice(partners,existing=null){
  </div>`;
 
  const form=$("invoice-form");
- const attachmentInput=$("invoice-form-attachment-files");
+  if(isUtilityTenant){
+   $("utility-options").hidden=false;
+   editor.querySelector("h2").textContent=existing
+    ?"Nebenkostenabrechnung bearbeiten"
+    :"Neue Nebenkostenabrechnung";
+   form.elements.invoice_type.value="outgoing";
+   form.elements.invoice_type.disabled=true;
+  }
+
+ if(isUtilityTenant){
+   const renameField=(name,label)=>{
+    const element=form.elements[name];
+    const wrapper=element?.closest("label");
+    if(wrapper){
+     const textNode=Array.from(wrapper.childNodes)
+      .find(node=>node.nodeType===Node.TEXT_NODE);
+     if(textNode)textNode.textContent=label;
+    }
+   };
+
+   const hideField=name=>{
+    const element=form.elements[name];
+    const wrapper=element?.closest("label");
+    if(wrapper)wrapper.hidden=true;
+   };
+
+   hideField("invoice_type");
+   $("xrechnung-options").hidden=true;
+
+   renameField("partner_id","Mieter");
+   renameField("invoice_date","Abrechnungsdatum");
+
+   const numberLabel=editor.querySelector(".readonly-number span");
+   if(numberLabel)numberLabel.textContent="NK-Abrechnungsnummer";
+
+   editor.querySelectorAll(".invoice-section-title").forEach(heading=>{
+    if(heading.textContent==="Rechnungspositionen")
+     heading.textContent="Umlagefähige Nebenkosten";
+    if(heading.textContent==="Rechnungsanhänge")
+     heading.textContent="Belege zur Nebenkostenabrechnung";
+   });
+
+   const attachmentInfo=$("invoice-form-attachments")
+    ?.querySelector("p.muted");
+   if(attachmentInfo)
+    attachmentInfo.textContent=
+     "Zusätzliche PDF-Belege zur Nebenkostenabrechnung. "+
+     "Maximal 20 Dateien, 10 MB je Datei und 20 MB insgesamt.";
+
+   $("save-finalize-invoice").textContent="NK-Abrechnung freigeben";
+   $("add-invoice-line").textContent="+ Nebenkostenposition hinzufügen";
+  }
+
+  if(isUtilityTenant){
+   const standardTotals=editor.querySelector(".invoice-totals");
+   if(standardTotals)standardTotals.hidden=true;
+  }
+
+  const attachmentInput=$("invoice-form-attachment-files");
  const attachmentSelected=$("invoice-form-attachment-selected");
  const existingAttachments=$("invoice-form-existing-attachments");
 
@@ -588,7 +1004,20 @@ async function newInvoice(partners,existing=null){
     existing.xrechnung_buyer_reference||"";
  }
 
- const body=$("invoice-line-body");
+ if(existing && isUtilityTenant){
+   form.elements.utility_period_from.value=
+    existing.utility_period_from||"";
+   form.elements.utility_period_to.value=
+    existing.utility_period_to||"";
+   form.elements.utility_prepayments.value=
+    existing.utility_prepayments??"0";
+   form.elements.utility_account_id.value=
+    existing.utility_account_id==null
+     ?""
+     :String(existing.utility_account_id);
+  }
+
+  const body=$("invoice-line-body");
 
  const optionHtml=(items,selected="",emptyLabel="Bitte wählen")=>
   '<option value="">'+esc(emptyLabel)+'</option>'+
@@ -619,7 +1048,26 @@ async function newInvoice(partners,existing=null){
   calculate();
  }
 
- function addLine(initial={}){
+ if(isUtilityTenant){
+   const headers=Array.from(
+    editor.querySelectorAll(".invoice-lines thead th")
+   );
+
+   if(headers.length!==13){
+    throw new Error("NK-Tabellenstruktur unerwartet: "+headers.length);
+   }
+
+   headers[0].textContent="Nebenkostenposition";
+   headers[2].textContent="Menge";
+   headers[9].textContent="Gesamtkosten / Umlageschlüssel";
+   headers[10].textContent="Mieteranteil";
+
+   [2,3,4,5,6,7,8,11].forEach(index=>{
+    headers[index].style.display="none";
+   });
+  }
+
+  function addLine(initial={}){
   const row=document.createElement("tr");
   row.innerHTML=`
    <td>
@@ -665,6 +1113,24 @@ async function newInvoice(partners,existing=null){
    <td>
     <select class="line-account"></select>
    </td>
+
+    <td class="utility-line-fields" hidden>
+     <label>Gesamtkosten (€)
+      <input class="utility-total-cost" type="number"
+       min="0" step="0.01"
+       value="${esc(initial.utility_total_cost??"0")}">
+     </label>
+     <label>Gesamtschlüssel
+      <input class="utility-total-key" type="number"
+       min="0" step="any"
+       value="${esc(initial.utility_total_key??"1")}">
+     </label>
+     <label>Mieterschlüssel
+      <input class="utility-tenant-key" type="number"
+       min="0" step="any"
+       value="${esc(initial.utility_tenant_key??"1")}">
+     </label>
+    </td>
    <td class="line-net-result">0,00 €</td>
    <td class="line-gross-result">0,00 €</td>
    <td>
@@ -674,6 +1140,27 @@ async function newInvoice(partners,existing=null){
    </td>`;
 
   body.appendChild(row);
+   if(isUtilityTenant){
+    const cells=Array.from(row.children);
+
+    if(cells.length!==13){
+     throw new Error("NK-Zellenstruktur unerwartet: "+cells.length);
+    }
+
+    [2,3,4,5,6,7,8,11].forEach(index=>{
+     cells[index].style.display="none";
+    });
+
+    const utilityCell=cells[9];
+    utilityCell.hidden=false;
+    utilityCell.style.display="";
+   }
+
+
+   row.querySelectorAll(".utility-line-fields").forEach(cell=>{
+    cell.hidden=!isUtilityTenant;
+   });
+
    row.querySelector(".line-discount-type").value=
     initial.discount_type||"none";
    row.querySelector(".line-discount-type").addEventListener(
@@ -758,12 +1245,68 @@ async function newInvoice(partners,existing=null){
      discount_type:get(".line-discount-type"),
      discount_value:get(".line-discount-value"),
     account_id:account?Number(account):null,
-    product_id:product?Number(product):null
+    product_id:product?Number(product):null,
+     ...(isUtilityTenant?{
+      utility_total_cost:get(".utility-total-cost"),
+      utility_total_key:get(".utility-total-key"),
+      utility_tenant_key:get(".utility-tenant-key")
+     }:{})
    };
   });
  }
 
+
+  function calculateUtility(){
+   if(!isUtilityTenant)return;
+
+   let tenantTotal=0;
+
+   body.querySelectorAll("tr").forEach(row=>{
+    const totalCost=numberValue(
+     row.querySelector(".utility-total-cost").value
+    );
+    const totalKey=numberValue(
+     row.querySelector(".utility-total-key").value
+    );
+    const tenantKey=numberValue(
+     row.querySelector(".utility-tenant-key").value
+    );
+
+    const valid=totalCost>=0&&totalKey>0&&
+     tenantKey>=0&&tenantKey<=totalKey;
+
+    const share=valid
+     ?cents(totalCost*tenantKey/totalKey)
+     :0;
+
+    tenantTotal+=share;
+
+    row.querySelector(".line-quantity").value="1";
+    row.querySelector(".line-price").value=share.toFixed(2);
+    row.querySelector(".line-discount-type").value="none";
+    row.querySelector(".line-discount-value").value="0";
+    row.querySelector(".line-vat").value="0";
+   });
+
+   tenantTotal=cents(tenantTotal);
+
+   const advance=numberValue(
+    form.elements.utility_prepayments.value
+   );
+   const difference=cents(tenantTotal-advance);
+
+   $("utility-tenant-total").textContent=euro(tenantTotal);
+   $("utility-advance-total").textContent=euro(advance);
+   $("utility-balance").textContent=euro(Math.abs(difference));
+
+   const label=$("utility-balance").parentElement;
+   label.firstChild.textContent=difference>=0
+    ?"Nachzahlung: "
+    :"Guthaben: ";
+  }
+
  function calculate(){
+  calculateUtility();
   let totalNet=0;
   let totalVat=0;
 
@@ -812,7 +1355,7 @@ async function newInvoice(partners,existing=null){
  form.elements.invoice_type.onchange=()=>{
   const type=form.elements.invoice_type.value;
    $("invoice-form-attachments").hidden=type!=="outgoing";
-   $("xrechnung-options").hidden=type!=="outgoing";
+   $("xrechnung-options").hidden=isUtilityTenant||type!=="outgoing";
    form.elements.xrechnung_enabled.disabled=type!=="outgoing";
    form.elements.xrechnung_buyer_reference.disabled=
     type!=="outgoing";
@@ -996,6 +1539,21 @@ async function newInvoice(partners,existing=null){
      ?(form.elements.xrechnung_buyer_reference.value.trim()||null)
      :null;
   data.lines=readLines();
+   if(isUtilityTenant){
+    data.utility_period_from=
+     form.elements.utility_period_from.value||null;
+    data.utility_period_to=
+     form.elements.utility_period_to.value||null;
+    data.utility_prepayments=
+     form.elements.utility_prepayments.value;
+     data.utility_account_id=Number(form.elements.utility_account_id.value);
+   }else{
+    delete data.utility_period_from;
+    delete data.utility_period_to;
+    delete data.utility_prepayments;
+     delete data.utility_account_id;
+   }
+
   delete data.invoice_number;
 
   if(!data.partner_id){
@@ -1095,7 +1653,7 @@ async function downloadInvoicePdf(invoiceId, invoiceNumber){
  try{
   const response=await fetch(
    `/api/invoices/${invoiceId}/pdf`,
-   {credentials:"same-origin",cache:"no-store"}
+   {credentials:"same-origin",cache:"no-store",headers:{"X-Tenant-ID":String(state.tenantId)}}
   );
 
   if(!response.ok){
@@ -1150,7 +1708,11 @@ function invoiceDiscountLabel(line){
 async function invoiceAttachmentRequest(path,options={}){
  const response=await fetch(path,{
   credentials:"same-origin",
-  ...options
+  ...options,
+  headers:{
+   ...(options.headers||{}),
+   "X-Tenant-ID":String(state.tenantId)
+  }
  });
 
  if(response.status===401){
@@ -1181,7 +1743,8 @@ async function openInvoiceAttachment(invoiceId,attachmentId){
   "/api/invoices/"+invoiceId+"/attachments/"+attachmentId,
   {
    credentials:"same-origin",
-   cache:"no-store"
+   cache:"no-store",
+   headers:{"X-Tenant-ID":String(state.tenantId)}
   }
  );
 
@@ -1345,7 +1908,28 @@ async function loadInvoiceAttachments(invoiceId){
  }
 }
 
-function invoiceDetail(i,partner=null){
+async function invoiceDetail(i,partner=null){
+ const activeTenant=(state.tenants||[]).find(t=>
+  Number(t.id)===Number(state.tenantId)
+ );
+ const isUtilityTenant=
+  activeTenant?.tenant_type==="vermieter" &&
+  i.utility_period_from!=null;
+ const utilityAdvance=Number(i.utility_prepayments||0);
+ const utilityDifference=Number(i.utility_difference||0);
+ const utilityShare=Number(i.gross_total||0);
+
+ const utilityCards=
+  '<div class="cards">'+
+  '<div class="card"><div class="muted">Mieteranteil</div><div class="metric">'+euro(utilityShare)+'</div></div>'+
+  '<div class="card"><div class="muted">Vorauszahlungen</div><div class="metric">'+euro(utilityAdvance)+'</div></div>'+
+  '<div class="card"><div class="muted">'+
+   (utilityDifference<0?"Guthaben":"Nachzahlung")+
+   '</div><div class="metric">'+euro(Math.abs(utilityDifference))+'</div></div>'+
+  '<div class="card"><div class="muted">Bereits bezahlt</div><div class="metric">'+euro(i.paid_total)+'</div></div>'+
+  '<div class="card"><div class="muted">Offener Saldo</div><div class="metric">'+euro(i.open_total)+'</div></div>'+
+  '</div>';
+
  const statusLabel={
   draft:"Entwurf",open:"Offen",partial:"Teilbezahlt",
   paid:"Bezahlt",cancelled:"Storniert"
@@ -1369,12 +1953,37 @@ function invoiceDetail(i,partner=null){
   ["Telefon",partner?.phone||"–"],
   ["USt-IdNr.",partner?.vat_id||"–"]
  ];
- const infoTable='<div class="panel"><h3>Rechnungsinformationen</h3>'+
+ if(isUtilityTenant){
+  info.length=0;
+  info.push(
+   ["NK-Abrechnungsnummer",i.invoice_number],
+   ["Abrechnungsdatum",i.invoice_date],
+   ["Abrechnungszeitraum von",i.utility_period_from||"–"],
+   ["Abrechnungszeitraum bis",i.utility_period_to||"–"],
+   ["Fälligkeit",i.due_date||"–"],
+   ["Status",statusLabel[i.status]||i.status],
+   ["Mieter",partner?.name||"Nicht zugeordnet"]
+  );
+ }
+
+ const infoTable='<div class="panel"><h3>'+(isUtilityTenant?"NK-Abrechnungsinformationen":"Rechnungsinformationen")+'</h3>'+
   table(["Angabe","Wert"],info.map(([k,v])=>
    '<tr><td>'+esc(k)+'</td><td>'+esc(v)+'</td></tr>'))+
   '</div>';
 
- const lines=table(
+ const lines=isUtilityTenant
+  ?table(
+   ["Position","Beschreibung","Gesamtkosten",
+    "Gesamtschlüssel","Mieterschlüssel","Mieteranteil"],
+   (i.lines||[]).map(l=>
+    '<tr><td>'+esc(l.position)+'</td>'+
+    '<td>'+esc(l.description)+'</td>'+
+    '<td>'+euro(l.utility_total_cost)+'</td>'+
+    '<td>'+esc(l.utility_total_key)+'</td>'+
+    '<td>'+esc(l.utility_tenant_key)+'</td>'+
+    '<td>'+euro(l.gross_total)+'</td></tr>')
+  )
+  :table(
   ["Position","Beschreibung","Menge","Einheit","Einzelpreis netto",
    "Rabatt","USt %","Netto","USt","Brutto"],
   (i.lines||[]).map(l=>
@@ -1407,25 +2016,26 @@ function invoiceDetail(i,partner=null){
 
  $("invoice-editor").innerHTML=
   '<div class="panel">'+
-   '<div class="toolbar"><div><h2>'+esc(typeLabel)+' '+esc(i.invoice_number)+'</h2>'+
+   '<div class="toolbar"><div><h2>'+esc(isUtilityTenant?'Nebenkostenabrechnung':typeLabel)+' '+esc(i.invoice_number)+'</h2>'+
    '<div class="muted">'+esc(partner?.name||"Nicht zugeordnet")+
    ' · '+esc(statusLabel[i.status]||i.status)+'</div></div>'+
    pdfButton+
-   (i.invoice_type==="outgoing"&&i.status!=="draft"
+   (!isUtilityTenant&&i.invoice_type==="outgoing"&&i.status!=="draft"
     ? '<button type="button" id="send-xrechnung">X-Rechnung</button>'
     : "")+
    '<button type="button" class="secondary" id="close-invoice-detail">Schließen</button>'+
    '</div>'+
+   (isUtilityTenant?utilityCards:
    '<div class="cards">'+
     '<div class="card"><div class="muted">Netto</div><div class="metric">'+euro(i.net_total)+'</div></div>'+
     '<div class="card"><div class="muted">USt</div><div class="metric">'+euro(i.vat_total)+'</div></div>'+
     '<div class="card"><div class="muted">Brutto</div><div class="metric">'+euro(i.gross_total)+'</div></div>'+
     '<div class="card"><div class="muted">Bezahlt</div><div class="metric">'+euro(i.paid_total)+'</div></div>'+
     '<div class="card"><div class="muted">Offen</div><div class="metric">'+euro(i.open_total)+'</div></div>'+
-   '</div>'+
-   '<h3>Rechnungspositionen</h3>'+lines+
+   '</div>')+
+   '<h3>'+(isUtilityTenant?'Nebenkostenpositionen':'Rechnungspositionen')+'</h3>'+lines+
    (i.invoice_type==="outgoing"
-    ?'<h3>Rechnungsanhänge</h3>'+
+    ?'<h3>'+(isUtilityTenant?'NK-Belege':'Rechnungsanhänge')+'</h3>'+
      '<div id="invoice-attachments">'+
      '<p class="muted">Dokumente werden geladen …</p>'+
      '</div>'
@@ -1434,7 +2044,7 @@ function invoiceDetail(i,partner=null){
    '<h3>Notizen</h3><p>'+esc(i.notes||"Keine Notizen")+'</p>'+
    '<div id="invoice-actions"></div>'+
   '</div>'+infoTable+
-  '<div class="panel"><h3>Partneranschrift</h3><p>'+address+'</p></div>';
+  '<div class="panel"><h3>'+(isUtilityTenant?'Mieteranschrift':'Partneranschrift')+'</h3><p>'+address+'</p></div>';
 
  if(i.invoice_type==="outgoing"){
   loadInvoiceAttachments(i.id);
@@ -1477,39 +2087,123 @@ function invoiceDetail(i,partner=null){
   }
 
  const actions=$("invoice-actions");
+ const utilityOpen=Number(i.open_total||0);
+ const paymentHeading=isUtilityTenant
+  ?(utilityOpen<0?"Auszahlung an Mieter erfassen":
+    utilityOpen>0?"Zahlungseingang erfassen":"Abrechnung ohne Zahlung ausgleichen")
+  :"Zahlung erfassen";
+ const paymentButtonLabel=isUtilityTenant
+  ?(utilityOpen<0?"Auszahlung speichern":
+    utilityOpen>0?"Zahlungseingang speichern":"Ausgleich speichern")
+  :"Zahlung speichern";
  if(i.status==="draft"){
   actions.innerHTML=
-   '<button type="button" id="finalize">Rechnung freigeben</button>';
+   '<button type="button" id="finalize">'+(isUtilityTenant?'NK-Abrechnung freigeben':'Rechnung freigeben')+'</button>';
   $("finalize").onclick=async()=>{
-   if(!confirm("Rechnung wirklich freigeben?"))return;
+   if(!confirm(isUtilityTenant?"NK-Abrechnung wirklich freigeben?":"Rechnung wirklich freigeben?"))return;
    try{
     await api("/api/invoices/"+i.id+"/finalize",{method:"POST"});
     await invoices();
-    notify("Rechnung freigegeben.");
+    notify(isUtilityTenant?"NK-Abrechnung freigegeben.":"Rechnung freigegeben.");
    }catch(err){notify(err.message,true);}
   };
  }else if(["open","partial"].includes(i.status)){
+  let paymentAccounts=[];
+  try{
+   const accounts=await api("/api/payment-accounts");
+   if(!Array.isArray(accounts)){
+    throw new Error("Ungueltige Antwort der Zahlungskonten-API.");
+   }
+   paymentAccounts=accounts.filter(a=>a.is_active===true);
+  }catch(err){
+   actions.innerHTML='<h3>'+paymentHeading+'</h3>'+
+    '<p class="muted">Zahlungskonten konnten nicht geladen werden.</p>';
+   notify(err.message,true);
+   return;
+  }
+
+  const accountOptions=paymentAccounts.map(a=>[
+   String(a.id),a.name
+  ]);
+
+  const defaultPaymentAccount=
+   paymentAccounts.find(a=>a.is_default===true)||
+   paymentAccounts[0];
+
   actions.innerHTML=
-   '<h3>Zahlung erfassen</h3>'+
+   '<h3>'+paymentHeading+'</h3>'+
+   (paymentAccounts.length===0
+    ?'<p class="muted">Kein aktives Zahlungskonto vorhanden.</p>'
+    :'')+
    '<form id="payment-form"><div class="grid-form">'+
-   field("payment_date","Zahlungsdatum","date",today())+
-   field("amount","Betrag","number",i.open_total)+
+   field("payment_account_id",
+     isUtilityTenant&&utilityOpen<0?"Auszahlungskonto":"Zahlungskonto",
+     "select",
+    defaultPaymentAccount?String(defaultPaymentAccount.id):"",
+    accountOptions)+
+   field("payment_date",
+     isUtilityTenant&&utilityOpen<0?"Auszahlungsdatum":"Zahlungsdatum",
+     "date",today())+
+   field("amount",
+     isUtilityTenant
+      ?(utilityOpen<0?"Auszahlungsbetrag":
+        utilityOpen>0?"Zahlungseingang":"Ausgleichsbetrag")
+      :"Betrag",
+     "number",i.open_total)+
    field("payment_method","Zahlungsart","select","bank",
     [["bank","Bank"],["cash","Bar"],["other","Sonstige"]])+
    field("reference","Referenz")+
-   '</div><button>Zahlung speichern</button></form>';
+   '</div><button'+(paymentAccounts.length===0?' disabled':'')+
+   '>'+paymentButtonLabel+'</button></form>';
+
   $("payment-form").onsubmit=async e=>{
    e.preventDefault();
    try{
+    const data=Object.fromEntries(new FormData(e.target));
+    const accountId=Number(data.payment_account_id);
+
+    if(!Number.isSafeInteger(accountId)||accountId<=0||
+       !paymentAccounts.some(a=>a.id===accountId)){
+     throw new Error("Bitte ein gueltiges Zahlungskonto auswaehlen.");
+    }
+
+    data.payment_account_id=accountId;
+
     await api("/api/invoices/"+i.id+"/payments",{
      method:"POST",
-     body:JSON.stringify(Object.fromEntries(new FormData(e.target)))
+     body:JSON.stringify(data)
     });
+
     await invoices();
-    notify("Zahlung gespeichert.");
+    notify(isUtilityTenant
+     ?(utilityOpen<0?"Auszahlung gespeichert.":
+       utilityOpen>0?"Zahlungseingang gespeichert.":
+       "Nullsaldo ausgeglichen.")
+     :"Zahlung gespeichert.");
    }catch(err){notify(err.message,true);}
   };
  }
+}
+
+// BUHA_ACCOUNT_BALANCE_CARDS_348
+function paymentAccountBalanceCards(accounts){
+ if(!Array.isArray(accounts)||!accounts.length){
+  return '<p class="muted">Keine Zahlungskonten vorhanden.</p>';
+ }
+
+ return '<div class="cards">'+accounts.map(account=>{
+  const name=account.name||account.account_name||
+   "Zahlungskonto "+(account.id||account.account_id||"");
+  const balance=account.balance??account.closing_balance??
+   account.current_balance??null;
+
+  // BUHA_ACCOUNT_DISPLAY_FIX_361
+  return '<div class="card" style="display:flex;flex-direction:column;gap:12px">'+
+   '<span class="muted">'+esc(name)+'</span>'+
+   '<strong style="display:block;font-size:24px">'+
+   (balance===null?"–":euro(balance))+
+   '</strong></div>';
+ }).join("")+'</div>';
 }
 
 async function journal(){
@@ -1526,68 +2220,692 @@ async function loadJournal(){
   data.bank_closing_balance!==undefined;
 
  const bankCards=bankAvailable
-  ? '<div class="panel"><h2>Bankübersicht</h2><div class="cards">'+
+  ? '<div class="panel"><h2>Gesamtübersicht Zahlungskonten</h2><div class="cards">'+
     [
-     ["Bankbestand Monatsanfang",
+     ["Gesamtbestand Monatsanfang",
       data.bank_opening_balance],
      ["Zahlungseingänge",data.bank_incoming],
      ["Zahlungsausgänge",data.bank_outgoing],
-     ["Bankbestand Monatsende",
+     ["Gesamtbestand Monatsende",
       data.bank_closing_balance]
     ].map(([label,value])=>
-     '<div class="card"><span>'+esc(label)+
-     '</span><strong>'+
+     '<div class="card"><div class="muted">'+esc(label)+
+     '</div><div class="metric">'+
      (value===null||value===undefined?"–":euro(value))+
-     '</strong></div>'
+     '</div></div>'
     ).join("")+'</div></div>'
   : '<div class="panel"><p class="muted">'+
     'Bankanfangsbestand und Stichtag bitte in der '+
     'Administration hinterlegen.</p></div>';
 
- $("j-result").innerHTML=bankCards+'<div class="cards">'+[["Netto",data.net_total],["USt",data.vat_total],["Brutto",data.gross_total]]
+ $("j-result").innerHTML=
+  '<div class="panel"><h2>Einzelne Zahlungskonten</h2>'+
+  paymentAccountBalanceCards(data.payment_accounts)+
+  '</div>'+
+  bankCards+'<div class="cards">'+[["Netto",data.net_total],["USt",data.vat_total],["Brutto",data.gross_total]]
  .map(([n,v])=>'<div class="card"><div class="muted">'+n+'</div><div class="metric">'+euro(v)+'</div></div>').join("")+
- '</div><div class="panel">'+table(["Datum","Rechnung","Art","Konto","Beschreibung","Netto","USt","Brutto"],
- data.rows.map(r=>'<tr><td>'+esc(r.payment_date)+'</td><td>'+esc(r.invoice_number)+'</td><td>'+esc(r.invoice_type)+
- '</td><td>'+esc(r.account_number)+'</td><td>'+esc(r.description)+'</td><td>'+euro(r.net)+
+ '</div><div class="panel">'+table(["Datum","Rechnung","Art","Konto","Beschreibung","Zahlungskonto","Netto","USt","Brutto"],
+ data.rows.map(r=>'<tr><td>'+esc(r.payment_date)+'</td><td>'+esc(r.invoice_number)+'</td><td>'+esc(
+  r.source_type==="manual_booking"
+   ?(r.invoice_type==="outgoing"?"Einnahme":"Ausgabe")
+   :(r.invoice_type==="outgoing"?"Ausgangsrechnung":
+     r.invoice_type==="incoming"?"Eingangsrechnung":
+     r.invoice_type)
+ )+'</td><td>'+esc(
+  [r.account_number,r.account_name].filter(Boolean).join(" - ")
+ )+'</td><td>'+esc(r.description)+'</td><td>'+esc(r.payment_account_name||'')+'</td><td>'+euro(r.net)+
  '</td><td>'+euro(r.vat)+'</td><td>'+euro(r.gross)+'</td></tr>'))+'</div>';
  }catch(e){notify(e.message,true);}
 }
 async function eur(){
- $("content").innerHTML='<div class="toolbar"><input id="e-year" type="number" value="'+new Date().getFullYear()+
- '"><button id="e-load">Auswerten</button></div><div id="e-result"></div>';
- $("e-load").onclick=loadEur;await loadEur();
+ const year=new Date().getFullYear();
+
+ $("content").innerHTML=
+  '<div class="toolbar">'+
+  '<label>Jahr <input id="e-year" type="number" min="2000" max="2099" value="'+year+'"></label>'+
+  '<label>Von <input id="e-from" type="date" value="'+year+'-01-01"></label>'+
+  '<label>Bis <input id="e-to" type="date" value="'+year+'-12-31"></label>'+
+  '<label>Darstellung <select id="e-view">'+
+  '<option value="details">Alle Einzelbuchungen</option>'+
+  '<option value="summary">Nur Kontensummen</option>'+
+  '</select></label>'+
+  '<label>Sortierung <select id="e-sort">'+
+  '<option value="date">Datum</option>'+
+  '<option value="account">Buchhaltungskonto</option>'+
+  '<option value="type">Einnahmen / Ausgaben</option>'+
+  '</select></label>'+
+  '<label>Gruppierung <select id="e-group">'+
+  '<option value="account">Buchhaltungskonto</option>'+
+  '<option value="type">Einnahmen / Ausgaben</option>'+
+  '<option value="date">Datum</option>'+
+  '</select></label>'+
+  '<button id="e-load">Auswerten</button>'+
+  '<button id="e-pdf" type="button">PDF exportieren</button>'+
+  '</div><div id="e-result"></div>';
+
+ $("e-year").onchange=()=>{
+  const y=Number($("e-year").value);
+  if(Number.isInteger(y)&&y>=2000&&y<=2099){
+   $("e-from").value=y+"-01-01";
+   $("e-to").value=y+"-12-31";
+  }
+ };
+
+ $("e-load").onclick=loadEur;
+ $("e-pdf").onclick=downloadEurPdf;
+
+ $("e-view").onchange=()=>{
+  const summary=$("e-summary");
+  const details=$("e-details");
+  const showDetails=$("e-view").value==="details";
+  if(summary)summary.style.display=showDetails?"none":"";
+  if(details)details.style.display=showDetails?"":"none";
+ };
+
+ await loadEur();
 }
+
 async function loadEur(){
- try{const d=await api("/api/accounting/eur?year="+Number($("e-year").value));
- const taxCards=
-  '<div class="panel"><h2>Umsatzsteuerübersicht (zahlungsbasiert)</h2>'+
-  '<div class="cards">'+
-  [
-   ["Vereinnahmte Umsatzsteuer",d.output_vat_total],
-   ["Berücksichtigte Vorsteuer",d.input_vat_total],
-   ["Umsatzsteuerdifferenz",d.vat_difference]
-  ].map(([label,value])=>
-   '<div class="card"><span>'+esc(label)+'</span>'+
-   '<strong>'+euro(value??0)+'</strong></div>'
-  ).join("")+
-  '</div><p class="muted">Diese Übersicht ist keine '+
-  'Umsatzsteuer-Voranmeldung. Steuerliche Fälligkeiten '+
-  'und Vorsteuerabzugszeitpunkte sind gesondert zu prüfen.</p>'+
-  '</div>';
+ try{
+  const year=Number($("e-year").value);
+  const from=$("e-from").value;
+  const to=$("e-to").value;
 
- $("e-result").innerHTML=taxCards+'<div class="cards">'+[["Einnahmen netto",d.income_net],["Ausgaben netto",d.expenses_net],["Ergebnis",d.result_net]]
- .map(([n,v])=>'<div class="card"><div class="muted">'+n+'</div><div class="metric">'+euro(v)+'</div></div>').join("")+
- '</div><div class="panel"><h2>Auswertung nach Konten</h2>'+
- table(["Art","Konto","Bezeichnung","Netto","USt","Brutto"],
- d.accounts.map(r=>'<tr><td>'+esc(r.invoice_type)+'</td><td>'+esc(r.account_number)+'</td><td>'+esc(r.account_name)+
- '</td><td>'+euro(r.net)+'</td><td>'+euro(r.vat)+'</td><td>'+euro(r.gross)+'</td></tr>'))+'</div>';
- }catch(e){notify(e.message,true);}
+  if(!Number.isInteger(year)||year<2000||year>2099){
+   throw new Error("Bitte ein gültiges Jahr zwischen 2000 und 2099 wählen.");
+  }
+
+  if(!from||!to||from>to){
+   throw new Error("Bitte einen gültigen Zeitraum Von/Bis auswählen.");
+  }
+
+  const params=new URLSearchParams({
+   year:String(year),
+   date_from:from,
+   date_to:to,
+   sort_by:$("e-sort").value,
+   group_by:$("e-group").value
+  });
+
+  const d=await api("/api/accounting/eur?"+params.toString());
+
+  if(!Array.isArray(d.accounts)||!Array.isArray(d.detail_groups)){
+   throw new Error("Die EÜR-API liefert keine vollständigen Auswertungsdaten.");
+  }
+
+  const taxCards=
+   '<div class="panel"><h2>Umsatzsteuerübersicht (zahlungsbasiert)</h2>'+
+   '<div class="cards">'+
+   [
+    ["Vereinnahmte Umsatzsteuer",d.output_vat_total],
+    ["Berücksichtigte Vorsteuer",d.input_vat_total],
+    ["Umsatzsteuerdifferenz",d.vat_difference]
+   ].map(([label,value])=>
+    '<div class="card"><div class="muted">'+esc(label)+'</div>'+
+    '<div class="metric">'+euro(value??0)+'</div></div>'
+   ).join("")+
+   '</div><p class="muted">Diese Übersicht ist keine '+
+   'Umsatzsteuer-Voranmeldung. Steuerliche Fälligkeiten '+
+   'und Vorsteuerabzugszeitpunkte sind gesondert zu prüfen.</p>'+
+   '</div>';
+
+  const totals=
+   '<div class="cards">'+
+   [
+    ["Einnahmen netto",d.income_net],
+    ["Ausgaben netto",d.expenses_net],
+    ["Ergebnis",d.result_net]
+   ].map(([name,value])=>
+    '<div class="card"><div class="muted">'+esc(name)+'</div>'+
+    '<div class="metric">'+euro(value)+'</div></div>'
+   ).join("")+
+   '</div>';
+
+  const summary=
+   '<div id="e-summary" class="panel">'+
+   '<h2>Auswertung nach Buchhaltungskonten</h2>'+
+   table(
+    ["Art","Konto","Bezeichnung","Netto","USt","Brutto"],
+    d.accounts.map(r=>
+     '<tr><td>'+esc(r.invoice_type==="outgoing"?"Einnahme":"Ausgabe")+'</td>'+
+     '<td>'+esc(r.account_number??"")+'</td>'+
+     '<td>'+esc(r.account_name??"")+'</td>'+
+     '<td>'+euro(r.net)+'</td>'+
+     '<td>'+euro(r.vat)+'</td>'+
+     '<td>'+euro(r.gross)+'</td></tr>'
+    )
+   )+
+   '</div>';
+
+  const details=
+   '<div id="e-details" class="panel">'+
+   '<h2>Alle Einzelbuchungen</h2>'+
+   '<p class="muted">Zeitraum: '+esc(d.date_from)+' bis '+esc(d.date_to)+'</p>'+
+   d.detail_groups.map(g=>
+    '<h3>'+esc(g.group)+'</h3>'+
+    table(
+     ["Datum","Rechnung","Art","Konto","Beschreibung","Netto","USt","Brutto"],
+     (g.rows||[]).map(r=>
+      '<tr><td>'+esc(r.payment_date)+'</td>'+
+      '<td>'+esc(r.invoice_number??"")+'</td>'+
+      '<td>'+esc(r.invoice_type==="outgoing"?"Einnahme":"Ausgabe")+'</td>'+
+      '<td>'+esc(r.account_number??"")+'</td>'+
+      '<td>'+esc(r.description??"")+'</td>'+
+      '<td>'+euro(r.net)+'</td>'+
+      '<td>'+euro(r.vat)+'</td>'+
+      '<td>'+euro(r.gross)+'</td></tr>'
+     )
+    )+
+    '<p><strong>Gruppensumme: Netto '+euro(g.net)+
+    ' | USt '+euro(g.vat)+
+    ' | Brutto '+euro(g.gross)+'</strong></p>'
+   ).join("")+
+   '</div>';
+
+  $("e-result").innerHTML=taxCards+totals+summary+details;
+
+  const showDetails=$("e-view").value==="details";
+  $("e-summary").style.display=showDetails?"none":"";
+  $("e-details").style.display=showDetails?"":"none";
+
+ }catch(e){
+  notify(e.message,true);
+ }
 }
-(async()=>{try{state.user=await api("/api/auth/me");showApp();await navigate("dashboard");}catch{showLogin();}})();
 
+async function downloadEurPdf(){
+ try{
+  const year=Number($("e-year").value);
+  const from=$("e-from").value;
+  const to=$("e-to").value;
+
+  if(!Number.isInteger(year)||year<2000||year>2099){
+   throw new Error("Bitte ein gültiges Jahr auswählen.");
+  }
+
+  if(!from||!to||from>to){
+   throw new Error("Bitte einen gültigen Zeitraum auswählen.");
+  }
+
+  const params=new URLSearchParams({
+   year:String(year),
+   date_from:from,
+   date_to:to,
+   sort_by:$("e-sort").value,
+   group_by:$("e-group").value,
+   view:$("e-view").value
+  });
+
+  const headers={};
+
+  if(state.tenantId){
+   headers["X-Tenant-ID"]=String(state.tenantId);
+  }
+
+  const response=await fetch(
+   "/api/accounting/eur/pdf?"+params.toString(),
+   {
+    method:"GET",
+    credentials:"same-origin",
+    headers
+   }
+  );
+
+  if(!response.ok){
+   let message="PDF-Export fehlgeschlagen.";
+
+   try{
+    const error=await response.json();
+    message=error.detail||message;
+   }catch{}
+
+   throw new Error(message);
+  }
+
+  const blob=await response.blob();
+
+  if(blob.type!=="application/pdf"){
+   throw new Error("Der Server hat keine PDF-Datei geliefert.");
+  }
+
+  const url=URL.createObjectURL(blob);
+  const link=document.createElement("a");
+
+  link.href=url;
+  link.download=
+   "EUR_"+from+"_"+to+"_"+$("e-view").value+".pdf";
+
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+
+  setTimeout(()=>URL.revokeObjectURL(url),1000);
+
+ }catch(e){
+  notify(e.message,true);
+ }
+}
+
+(async()=>{
+ try{
+  state.user=await api("/api/auth/me");
+  await loadTenants();
+  showApp();
+  if(state.user?.role==="system_admin")await navigate("systemAdministration");
+  else if(state.tenantId)await navigate("dashboard");
+  else $("content").innerHTML='<div class="panel">Keine Mandantenzuordnung vorhanden.</div>';
+ }catch{showLogin();}
+})();
+
+
+
+async function paymentAccounts(){
+ if(state.tenantRole!=="admin"){
+  $("content").innerHTML="<p>Keine Berechtigung.</p>";
+  return;
+ }
+ const accounts=await api("/api/payment-accounts");
+ const todayDate=new Date().toISOString().slice(0,10);
+ const balances=await api("/api/payment-accounts/balances?target_date="+todayDate);
+ const transfers=await api("/api/payment-account-transfers");
+
+ if(!Array.isArray(accounts)||!Array.isArray(balances)||!Array.isArray(transfers)){
+  throw new Error("Ungueltige Antwort der Zahlungskonten-API.");
+ }
+
+ const balanceById=new Map(balances.map(b=>[Number(b.id||b.account_id),b]));
+
+ $("content").innerHTML=
+  '<div class="panel"><h2>Zahlungskonten</h2>'+
+  '<p class="muted">Zahlungskonten des aktuellen Mandanten</p>'+
+  '<div id="payment-account-list"></div>'+
+  '<h3>Neues Zahlungskonto</h3>'+
+  '<form id="new-payment-account"><div class="grid-form">'+
+  field("name","Kontoname")+
+  field("opening_balance","Anfangsbestand","number","0")+
+  field("opening_date","Anfangsdatum","date",todayDate)+
+  '</div><label><input type="checkbox" name="is_default"> Als Standardkonto festlegen</label>'+
+  '<div><button>Konto anlegen</button></div></form></div>';
+
+ $("content").insertAdjacentHTML("beforeend",
+  '<div class="panel"><h2>Umbuchungen</h2>'+
+  '<form id="payment-transfer-form"><div class="grid-form">'+
+  field("source_account_id","Quellkonto","select","",[])+
+  field("target_account_id","Zielkonto","select","",[])+
+  field("transfer_date","Buchungsdatum","date",todayDate)+
+  field("amount","Betrag (EUR)","number","")+
+  field("reference","Referenz")+
+  '</div><button type="submit">Umbuchung speichern</button></form>'+
+  '<h3>Umbuchungshistorie</h3>'+
+  '<div id="payment-transfer-list"></div></div>'
+ );
+
+
+ const rows=accounts.map(account=>{
+  const balance=balanceById.get(Number(account.id));
+  const balanceValue=balance?.balance??balance?.current_balance;
+  return '<tr>'+
+   '<td>'+esc(account.name)+'</td>'+
+   '<td>'+esc(account.is_active?"Aktiv":"Inaktiv")+'</td>'+
+   '<td>'+esc(account.is_default?"Standard":"–")+'</td>'+
+   '<td>'+euro(account.opening_balance)+'</td>'+
+   '<td>'+esc(account.opening_date)+'</td>'+
+   '<td>'+(balanceValue==null?"–":euro(balanceValue))+'</td>'+
+   '<td>'+
+   (!account.is_default&&account.is_active
+    ?'<button type="button" data-default-account="'+Number(account.id)+'">Als Standard</button>'
+    :'')+
+   '<button type="button" data-edit-account="'+Number(account.id)+'">Bearbeiten</button>'+
+   '</td></tr>';
+ });
+
+ $("payment-account-list").innerHTML=table(
+  ["Konto","Status","Standard","Anfangsbestand","Anfangsdatum","Kontostand","Aktionen"],
+  rows
+ );
+
+
+ const activeAccounts=accounts.filter(a=>a.is_active===true);
+ const sourceSelect=$("payment-transfer-form").elements.source_account_id;
+ const targetSelect=$("payment-transfer-form").elements.target_account_id;
+
+ for(const account of activeAccounts){
+  sourceSelect.add(new Option(account.name,String(account.id)));
+  targetSelect.add(new Option(account.name,String(account.id)));
+ }
+
+ if(activeAccounts.length>1){
+  targetSelect.value=String(activeAccounts[1].id);
+ }else{
+  $("payment-transfer-form").querySelector('button[type="submit"]').disabled=true;
+ }
+
+ const accountNames=new Map(
+  accounts.map(a=>[Number(a.id),a.name])
+ );
+
+ $("payment-transfer-list").innerHTML=table(
+  ["Datum","Quellkonto","Zielkonto","Betrag","Referenz"],
+  transfers.map(t=>'<tr>'+
+   '<td>'+esc(t.transfer_date)+'</td>'+
+   '<td>'+esc(accountNames.get(Number(t.source_account_id))||t.source_account_id)+'</td>'+
+   '<td>'+esc(accountNames.get(Number(t.target_account_id))||t.target_account_id)+'</td>'+
+   '<td>'+euro(t.amount)+'</td>'+
+   '<td>'+esc(t.reference||"")+'</td></tr>')
+ );
+
+ $("payment-transfer-form").onsubmit=async e=>{
+  e.preventDefault();
+  try{
+   const data=Object.fromEntries(new FormData(e.target));
+   data.source_account_id=Number(data.source_account_id);
+   data.target_account_id=Number(data.target_account_id);
+
+   if(!Number.isSafeInteger(data.source_account_id)||
+      !Number.isSafeInteger(data.target_account_id)||
+      data.source_account_id===data.target_account_id||
+      !activeAccounts.some(a=>Number(a.id)===data.source_account_id)||
+      !activeAccounts.some(a=>Number(a.id)===data.target_account_id)){
+    throw new Error("Bitte zwei unterschiedliche aktive Konten auswaehlen.");
+   }
+
+   const amount=Number(data.amount);
+   if(!Number.isFinite(amount)||amount<=0||
+      !/^\\d+(?:\\.\\d{1,2})?$/.test(data.amount)){
+    throw new Error("Betrag muss positiv sein und maximal zwei Nachkommastellen haben.");
+   }
+
+   if(!/^\\d{4}-\\d{2}-\\d{2}$/.test(data.transfer_date)){
+    throw new Error("Bitte ein Buchungsdatum eingeben.");
+   }
+
+   if((data.reference||"").length>255){
+    throw new Error("Referenz darf maximal 255 Zeichen enthalten.");
+   }
+
+   await api("/api/payment-account-transfers",{
+    method:"POST",
+    body:JSON.stringify(data)
+   });
+
+   await paymentAccounts();
+   notify("Umbuchung gespeichert.");
+  }catch(err){
+   notify(err.message,true);
+  }
+ };
+
+$("new-payment-account").onsubmit=async e=>{
+  e.preventDefault();
+  const data=Object.fromEntries(new FormData(e.target));
+  data.is_default=e.target.elements.is_default.checked;
+  try{
+   await api("/api/payment-accounts",{
+    method:"POST",body:JSON.stringify(data)
+   });
+   notify("Zahlungskonto angelegt.");
+   await paymentAccounts();
+  }catch(err){notify(err.message,true);}
+ };
+
+ $("payment-account-list").onclick=async e=>{
+  const defaultButton=e.target.closest("[data-default-account]");
+  const editButton=e.target.closest("[data-edit-account]");
+
+  if(defaultButton){
+   const id=Number(defaultButton.dataset.defaultAccount);
+   try{
+    await api("/api/payment-accounts/"+id,{
+     method:"PATCH",
+     body:JSON.stringify({is_default:true})
+    });
+    await paymentAccounts();
+    notify("Standardkonto geaendert.");
+   }catch(err){notify(err.message,true);}
+   return;
+  }
+
+  if(editButton){
+   const id=Number(editButton.dataset.editAccount);
+   const account=accounts.find(a=>Number(a.id)===id);
+   if(!account)return;
+
+   const editor=document.createElement("div");
+   editor.className="panel";
+   editor.innerHTML=
+    '<h3>Zahlungskonto bearbeiten</h3>'+
+    '<form id="edit-payment-account"><div class="grid-form">'+
+    field("name","Kontoname","text",account.name)+
+    field("opening_balance","Anfangssaldo (EUR)","number",account.opening_balance)+
+    field("opening_date","Anfangsdatum","date",account.opening_date)+
+    '</div><button type="submit">Änderungen speichern</button> '+
+    '<button type="button" id="cancel-payment-account-edit">Abbrechen</button>'+
+    '</form>';
+
+   const existing=$("edit-payment-account");
+   if(existing)existing.closest(".panel").remove();
+
+   $("payment-account-list").after(editor);
+
+   $("cancel-payment-account-edit").onclick=()=>editor.remove();
+
+   $("edit-payment-account").onsubmit=async event=>{
+    event.preventDefault();
+    const form=event.target;
+    const data=Object.fromEntries(new FormData(form));
+
+    data.name=data.name.trim();
+
+    if(!data.name){
+     notify("Kontoname darf nicht leer sein.",true);
+     return;
+    }
+
+    data.opening_balance=data.opening_balance.trim().replace(",", ".");
+
+    if(!/^-?\d+(?:\.\d{1,2})?$/.test(data.opening_balance)){
+     notify("Bitte einen gültigen Anfangssaldo mit maximal zwei Nachkommastellen eingeben.",true);
+     return;
+    }
+
+    if(!/^\d{4}-\d{2}-\d{2}$/.test(data.opening_date)){
+     notify("Bitte ein gültiges Anfangsdatum eingeben.",true);
+     return;
+    }
+
+    try{
+     await api("/api/payment-accounts/"+id,{
+      method:"PATCH",
+      body:JSON.stringify(data)
+     });
+     await paymentAccounts();
+     notify("Zahlungskonto aktualisiert.");
+    }catch(err){
+     notify(err.message,true);
+    }
+   };
+
+  }
+ };
+}
+
+
+// BUHA_ADMIN_SUBMENU_NAV_338
+let activeAdminSection="company";
+
+// BUHA_ADMIN_SUBMENU_WIRING_339
+function refreshAdminSubmenu(){
+ setupAdminSubmenu();
+
+ const menu=$("admin-menu");
+ const submenu=$("admin-submenu");
+ const toggle=$("admin-menu-toggle");
+
+ if(!menu||!submenu||!toggle)return;
+
+ const adminPages=[
+  "administration","paymentAccounts","accounts"
+ ];
+
+ const expanded=adminPages.includes(state.page);
+
+ submenu.classList.toggle("hidden",!expanded);
+ toggle.setAttribute("aria-expanded",String(expanded));
+}
+
+function setupAdminSubmenu(){
+ const menu=$("admin-menu");
+ const toggle=$("admin-menu-toggle");
+ const submenu=$("admin-submenu");
+
+ if(!menu||!toggle||!submenu)return;
+
+ // BUHA_ADMIN_NAV_FINAL_355
+ const allowed=state.user?.role!=="system_admin"&&
+               state.tenantRole==="admin";
+
+ menu.classList.toggle("hidden",!allowed);
+
+ if(!allowed){
+  submenu.classList.add("hidden");
+  toggle.setAttribute("aria-expanded","false");
+  return;
+ }
+
+ toggle.onclick=()=>{
+  const expanded=toggle.getAttribute("aria-expanded")==="true";
+  toggle.setAttribute("aria-expanded",String(!expanded));
+  submenu.classList.toggle("hidden",expanded);
+ };
+
+ submenu.querySelectorAll("[data-admin-section]").forEach(button=>{
+  button.addEventListener("click",()=>{
+   activeAdminSection=button.dataset.adminSection;
+  });
+ });
+}
+
+// BUHA_ADMIN_SECTIONS_343
+// BUHA_ADMIN_VISIBILITY_352
+function showAdminSection(){
+ const section=["company","mail","invoices"].includes(activeAdminSection)
+  ?activeAdminSection:"company";
+ const form=$("admin-form");
+ if(!form)return;
+
+ const groups={
+  company:[
+   "company_name","street","postal_code","city",
+   "email","phone","tax_number","vat_id",
+   "bank_name","website","bank_holder","iban","bic"
+  ],
+  invoices:[
+   "invoice_prefix","invoice_digits","invoice_next",
+   "incoming_prefix","incoming_digits","incoming_next",
+   "utility_invoice_prefix","utility_invoice_digits",
+   "utility_invoice_next",
+   "booking_income_prefix","booking_income_digits",
+   "booking_income_next",
+   "booking_expense_prefix","booking_expense_digits",
+   "booking_expense_next"
+  ],
+  mail:[
+   "smtp_host","smtp_port","smtp_security",
+   "smtp_username","smtp_from_name","smtp_from_email",
+   "smtp_reply_to","invoice_mail_subject",
+   "invoice_mail_body","invoice_auto_send_enabled",
+   "invoice_bcc_enabled","invoice_bcc_email"
+  ]
+ };
+
+ // BUHA_INVOICE_SETTINGS_TENANT_362
+ const tenant=(state.tenants||[]).find(t=>
+  Number(t.id)===Number(state.tenantId)
+ );
+ const isLandlord=tenant?.tenant_type==="vermieter";
+
+ if(section==="invoices"){
+  const outgoing=[
+   "invoice_prefix","invoice_digits","invoice_next"
+  ];
+  const utility=[
+   "utility_invoice_prefix","utility_invoice_digits",
+   "utility_invoice_next"
+  ];
+  groups.invoices=groups.invoices.filter(name=>
+   isLandlord?!outgoing.includes(name):!utility.includes(name)
+  );
+ }
+
+ const headings={
+  company:"Firmendaten",
+  mail:"E-Mail-Einstellungen",
+  invoices:isLandlord
+   ?"NK-Abrechnungseinstellungen"
+   :"Rechnungseinstellungen"
+ };
+
+ const heading=form.closest(".panel")?.querySelector("h2");
+ if(heading)heading.textContent=headings[section];
+
+ form.querySelectorAll("[name]").forEach(el=>{
+  const label=el.closest("label");
+  if(label)label.classList.toggle(
+   "hidden",!groups[section].includes(el.name)
+  );
+ });
+
+ // BUHA_ADMIN_FORM_FIX_353
+ form.querySelectorAll(".grid-form").forEach(grid=>{
+  const fields=[...grid.querySelectorAll("[name]")];
+  if(fields.length){
+   grid.classList.toggle(
+    "hidden",
+    !fields.some(el=>groups[section].includes(el.name))
+   );
+  }
+ });
+
+ form.querySelectorAll("h3").forEach(h=>{
+  h.classList.toggle("hidden",section!=="mail");
+ });
+
+ const password=$("smtp-password");
+ if(password){
+  password.closest("label")?.classList.toggle(
+   "hidden",section!=="mail"
+  );
+ }
+
+ const logo=$("admin-logo");
+ if(logo){
+  logo.closest(".panel")?.classList.toggle(
+   "hidden",section!=="company"
+  );
+ }
+
+ const accounts=$("admin-accounts");
+ if(accounts)accounts.closest(".panel")?.classList.add("hidden");
+
+ const smtpTest=$("buha-smtp-test-send");
+ if(smtpTest){
+  smtpTest.closest(".panel")?.classList.toggle(
+   "hidden",section!=="mail"
+  );
+ }
+
+ // BUHA_ADMIN_HINTS_356
+ form.querySelectorAll(".hint").forEach(h=>{
+  h.classList.toggle("hidden",section!=="mail");
+ });
+
+ form.querySelectorAll(".bcc-toggle").forEach(label=>{
+  label.classList.toggle("hidden",section!=="mail");
+ });
+}
 
 async function administration(){
- if(state.user?.role!=="admin"){
+ if(state.tenantRole!=="admin"){
   $("content").innerHTML="<p>Keine Berechtigung.</p>";
   return;
  }
@@ -1608,15 +2926,23 @@ async function administration(){
   ["website","Internetadresse"],
   ["bank_holder","Kontoinhaber"],
   ["iban","IBAN"],
-   ["bank_opening_balance","Bankanfangsbestand (EUR)"],
-   ["bank_opening_date","Bankanfangsbestand zum (JJJJ-MM-TT)"],
+
   ["bic","BIC"],
   ["invoice_prefix","Präfix Ausgangsrechnung"],
   ["invoice_digits","Stellen RE"],
   ["invoice_next","Startnummer RE"],
   ["incoming_prefix","Präfix Eingangsrechnung"],
   ["incoming_digits","Stellen LR"],
-  ["incoming_next","Startnummer LR"]
+  ["incoming_next","Startnummer LR"],
+   ["utility_invoice_prefix","Nebenkosten: Präfix"],
+   ["utility_invoice_digits","Nebenkosten: Stellenzahl"],
+   ["utility_invoice_next","Nebenkosten: Startnummer"],
+   ["booking_income_prefix","Einnahmen: Präfix"],
+   ["booking_income_digits","Einnahmen: Stellenzahl"],
+   ["booking_income_next","Einnahmen: Startnummer"],
+   ["booking_expense_prefix","Ausgaben: Präfix"],
+   ["booking_expense_digits","Ausgaben: Stellenzahl"],
+   ["booking_expense_next","Ausgaben: Startnummer"]
  ];
 
  $("content").innerHTML=`
@@ -1774,19 +3100,80 @@ async function administration(){
   }
  }
 
+ showAdminSection();
+
  $("admin-accounts").onclick=()=>navigate("accounts");
 
  $("admin-form").onsubmit=async e=>{
   e.preventDefault();
-  const data=Object.fromEntries(new FormData(e.target));
+  // BUHA_ADMIN_SAVE_344
+  const allowed={
+   company:[
+    "company_name","street","postal_code","city",
+    "email","phone","tax_number","vat_id",
+    "bank_name","website","bank_holder","iban","bic"
+   ],
+   invoices:[
+    "invoice_prefix","invoice_digits","invoice_next",
+    "incoming_prefix","incoming_digits","incoming_next",
+    "utility_invoice_prefix","utility_invoice_digits",
+    "utility_invoice_next",
+    "booking_income_prefix","booking_income_digits",
+    "booking_income_next",
+    "booking_expense_prefix","booking_expense_digits",
+    "booking_expense_next"
+   ],
+   mail:[
+    "smtp_host","smtp_port","smtp_security",
+    "smtp_username","smtp_from_name","smtp_from_email",
+    "smtp_reply_to","invoice_mail_subject",
+    "invoice_mail_body","invoice_auto_send_enabled",
+    "invoice_bcc_enabled","invoice_bcc_email"
+   ]
+  };
+  // BUHA_INVOICE_SAVE_TENANT_363
+  const section=activeAdminSection||"company";
+  let names=allowed[section];
+  if(!names)return notify("Ungültiger Administrationsbereich.",true);
 
-  data.invoice_bcc_enabled=Boolean($("invoice-bcc-enabled").checked);
-  data.invoice_auto_send_enabled=
-   Boolean($("invoice-auto-send-enabled").checked);
+  if(section==="invoices"){
+   const tenant=(state.tenants||[]).find(t=>
+    Number(t.id)===Number(state.tenantId)
+   );
+   const isLandlord=tenant?.tenant_type==="vermieter";
+   const outgoing=[
+    "invoice_prefix","invoice_digits","invoice_next"
+   ];
+   const utility=[
+    "utility_invoice_prefix","utility_invoice_digits",
+    "utility_invoice_next"
+   ];
+   names=names.filter(name=>
+    isLandlord?!outgoing.includes(name):!utility.includes(name)
+   );
+  }
+
+  const formData=new FormData(e.target);
+  const data={};
+
+  for(const name of names){
+   if(name==="invoice_bcc_enabled"||
+      name==="invoice_auto_send_enabled"){
+    data[name]=formData.has(name);
+   }else if(formData.has(name)){
+    data[name]=formData.get(name);
+   }
+  }
+
   for(const key of [
    "invoice_digits","incoming_digits",
-   "invoice_next","incoming_next"
-  ])data[key]=Number(data[key]);
+   "invoice_next","incoming_next",
+   "utility_invoice_digits","utility_invoice_next",
+   "booking_income_digits","booking_income_next",
+   "booking_expense_digits","booking_expense_next"
+  ]){
+   if(key in data)data[key]=Number(data[key]);
+  }
 
   try{
    await api("/api/administration",{
@@ -1794,7 +3181,7 @@ async function administration(){
     body:JSON.stringify({values:data})
    });
    const smtpPassword=$("smtp-password").value;
-   if(smtpPassword){
+   if(section==="mail"&&smtpPassword){
     await api("/api/administration/smtp/password",{
      method:"PUT",
      body:JSON.stringify({password:smtpPassword})

@@ -5,7 +5,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
-from app.api.dependencies import CurrentUser, DatabaseSession
+from app.api.dependencies import TenantUser, DatabaseSession
 from app.models.account import Account
 from app.models.product import Product
 
@@ -33,12 +33,12 @@ def serialize(item):
     }
 
 
-def validate_product(data, db):
+def validate_product(data, db, tenant_id):
     if data.product_type not in {"product", "service"}:
         raise HTTPException(422, "Ungueltiger Produkttyp.")
 
     if data.revenue_account_id is not None:
-        account = db.get(Account, data.revenue_account_id)
+        account = db.scalar(select(Account).where(Account.id == data.revenue_account_id, Account.tenant_id == tenant_id))
         if account is None or not account.is_active:
             raise HTTPException(422, "Buchungskonto nicht vorhanden oder inaktiv.")
         if account.account_type not in {"income", "expense"}:
@@ -46,32 +46,32 @@ def validate_product(data, db):
 
 
 @router.get("")
-def list_products(db: DatabaseSession, user: CurrentUser):
+def list_products(db: DatabaseSession, user: TenantUser):
     items = db.scalars(
-        select(Product).order_by(Product.name, Product.id)
+        select(Product).where(Product.tenant_id == user.tenant_id).order_by(Product.name, Product.id)
     ).all()
     return [serialize(item) for item in items]
 
 
 @router.get("/{item_id}")
-def get_product(item_id: int, db: DatabaseSession, user: CurrentUser):
-    item = db.get(Product, item_id)
+def get_product(item_id: int, db: DatabaseSession, user: TenantUser):
+    item = db.scalar(select(Product).where(Product.id == item_id, Product.tenant_id == user.tenant_id))
     if item is None:
         raise HTTPException(404, "Produkt nicht gefunden.")
     return serialize(item)
 
 
 @router.post("", status_code=201)
-def create_product(data: ProductData, db: DatabaseSession, user: CurrentUser):
-    validate_product(data, db)
+def create_product(data: ProductData, db: DatabaseSession, user: TenantUser):
+    validate_product(data, db, user.tenant_id)
 
     values = data.model_dump()
     if data.revenue_account_id is not None:
-        account = db.get(Account, data.revenue_account_id)
+        account = db.scalar(select(Account).where(Account.id == data.revenue_account_id, Account.tenant_id == user.tenant_id))
         values["vat_rate"] = account.default_vat_rate
     else:
         values["vat_rate"] = Decimal("0")
-    item = Product(**values)
+    item = Product(tenant_id=user.tenant_id, **values)
     db.add(item)
 
     try:
@@ -89,17 +89,17 @@ def update_product(
     item_id: int,
     data: ProductData,
     db: DatabaseSession,
-    user: CurrentUser,
+    user: TenantUser,
 ):
-    item = db.get(Product, item_id)
+    item = db.scalar(select(Product).where(Product.id == item_id, Product.tenant_id == user.tenant_id))
     if item is None:
         raise HTTPException(404, "Produkt nicht gefunden.")
 
-    validate_product(data, db)
+    validate_product(data, db, user.tenant_id)
 
     values = data.model_dump()
     if data.revenue_account_id is not None:
-        account = db.get(Account, data.revenue_account_id)
+        account = db.scalar(select(Account).where(Account.id == data.revenue_account_id, Account.tenant_id == user.tenant_id))
         values["vat_rate"] = account.default_vat_rate
     else:
         values["vat_rate"] = item.vat_rate

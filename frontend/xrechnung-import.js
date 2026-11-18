@@ -88,6 +88,7 @@ async function showXRechnungImport(partners) {
       const response = await fetch("/api/xrechnung/incoming/preview", {
         method: "POST",
         credentials: "same-origin",
+        headers: {"X-Tenant-ID": String(state.tenantId)},
         body: formData
       });
 
@@ -274,6 +275,7 @@ async function showXRechnungImport(partners) {
         const response = await fetch("/api/xrechnung/incoming/import", {
           method: "POST",
           credentials: "same-origin",
+          headers: {"X-Tenant-ID": String(state.tenantId)},
           body: formData
         });
 

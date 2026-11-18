@@ -2,7 +2,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import Response
 from sqlalchemy import select, text
 
-from app.api.dependencies import CurrentUser, DatabaseSession
+from app.api.dependencies import DatabaseSession, TenantUser
 from app.models.invoice import Invoice
 from app.models.invoice_line import InvoiceLine
 from app.models.partner import Partner
@@ -16,9 +16,14 @@ router = APIRouter(prefix="/api/invoices", tags=["Rechnungs-PDF"])
 def download_invoice_pdf(
     invoice_id: int,
     db: DatabaseSession,
-    user: CurrentUser,
+    tenant: TenantUser,
 ):
-    invoice = db.get(Invoice, invoice_id)
+    invoice = db.scalar(
+        select(Invoice).where(
+            Invoice.id == invoice_id,
+            Invoice.tenant_id == tenant.tenant_id,
+        )
+    )
 
     if invoice is None:
         raise HTTPException(404, "Rechnung nicht gefunden.")
@@ -29,7 +34,14 @@ def download_invoice_pdf(
     if invoice.status == "draft":
         raise HTTPException(409, "Entwurf nicht freigegeben.")
 
-    partner = db.get(Partner, invoice.partner_id)
+    partner = db.scalar(
+        select(Partner).where(
+            Partner.id == invoice.partner_id,
+            Partner.tenant_id == tenant.tenant_id,
+        )
+    )
+    if partner is None:
+        raise HTTPException(404, "Geschaeftspartner nicht gefunden.")
 
     lines = db.scalars(
         select(InvoiceLine)
@@ -43,13 +55,17 @@ def download_invoice_pdf(
         .order_by(Payment.payment_date, Payment.id)
     ).all()
 
-    row = db.execute(text("""
-        SELECT settings, logo
-        FROM company_settings WHERE id=1
-    """)).first()
+    row = db.execute(
+        text("""
+            SELECT logo
+            FROM company_settings
+            WHERE tenant_id=:tenant_id
+        """),
+        {"tenant_id": tenant.tenant_id},
+    ).first()
 
-    settings = row[0] if row else {}
-    logo = bytes(row[1]) if row and row[1] else None
+    settings = load_settings(db, tenant.tenant_id)
+    logo = bytes(row[0]) if row and row[0] else None
 
     from app.models.product import Product
 
@@ -85,13 +101,14 @@ from app.api.administration import load_settings, smtp_cipher_buha
 def send_invoice_email_buha(
     invoice_id: int,
     db: DatabaseSession,
-    user: CurrentUser,
+    tenant: TenantUser,
 ):
     from app.services.invoice_email import deliver_invoice_email
 
     result = deliver_invoice_email(
         db,
         invoice_id,
+        tenant_id=tenant.tenant_id,
         delivery_type="manual",
     )
 
@@ -108,13 +125,18 @@ def send_invoice_email_buha(
 def get_invoice_email_history(
     invoice_id: int,
     db: DatabaseSession,
-    user: CurrentUser,
+    tenant: TenantUser,
 ):
     from app.services.invoice_email import invoice_email_history
 
-    invoice = db.get(Invoice, invoice_id)
+    invoice = db.scalar(
+        select(Invoice).where(
+            Invoice.id == invoice_id,
+            Invoice.tenant_id == tenant.tenant_id,
+        )
+    )
 
     if invoice is None:
         raise HTTPException(404, "Rechnung nicht gefunden.")
 
-    return invoice_email_history(db, invoice_id)
+    return invoice_email_history(db, invoice_id, tenant.tenant_id)

@@ -11,6 +11,7 @@ class Payment(Base):
     invoice_id: Mapped[int] = mapped_column(
         ForeignKey("invoices.id", ondelete="RESTRICT"), nullable=False
     )
+    payment_account_id: Mapped[int | None] = mapped_column(ForeignKey("payment_accounts.id", ondelete="RESTRICT"), nullable=True, index=True)
     payment_date: Mapped[date] = mapped_column(Date, nullable=False)
     amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
     payment_method: Mapped[str] = mapped_column(String(30), nullable=False)

@@ -68,6 +68,15 @@ def wrapped(c, value, x, y, width, size=8, leading=11,
 
 
 def qr_image(settings, invoice):
+    if (
+        invoice.utility_period_from is not None
+        and (
+            invoice.utility_difference is None
+            or Decimal(str(invoice.utility_difference)) <= 0
+        )
+    ):
+        return None
+
     iban = "".join(txt(settings.get("iban")).split())
     bic = "".join(txt(settings.get("bic")).split())
     holder = txt(
@@ -77,7 +86,7 @@ def qr_image(settings, invoice):
         return None
     payload = "\n".join([
         "BCD", "002", "1", "SCT", bic, holder[:70],
-        iban, f"EUR{Decimal(str(invoice.gross_total)):.2f}",
+        iban, f"EUR{Decimal(str(invoice.utility_difference if invoice.utility_period_from is not None else invoice.gross_total)):.2f}",
         "", "", txt(invoice.invoice_number)[:140], ""
     ])
     qr = qrcode.QRCode(
@@ -113,7 +122,11 @@ def render_invoice_pdf(invoice, partner, lines, payments,
         (Decimal(str(p.amount)) for p in payments),
         Decimal("0")
     )
-    balance = Decimal(str(invoice.gross_total)) - paid
+    balance = Decimal(str(
+        invoice.utility_difference
+        if invoice.utility_period_from is not None
+        else invoice.gross_total
+    )) - paid
 
     def footer(page):
         c.setStrokeColor(LIGHT)
@@ -374,6 +387,50 @@ def render_invoice_pdf(invoice, partner, lines, payments,
              label in {"Bruttosumme", "Offener Zahlbetrag"},
              right=True)
         sy -= 13
+
+    if invoice.utility_period_from is not None:
+        nk_cost = Decimal(str(invoice.utility_total_cost))
+        nk_advance = Decimal(str(invoice.utility_prepayments))
+        nk_difference = Decimal(str(invoice.utility_difference))
+
+        nk_rows = [
+            ("Nebenkosten gesamt", nk_cost),
+            ("Abzgl. Vorauszahlungen", -nk_advance),
+        ]
+
+        if nk_difference > 0:
+            nk_rows.append(("Nachzahlung", nk_difference))
+        elif nk_difference < 0:
+            nk_rows.append(("Guthaben", -nk_difference))
+        else:
+            nk_rows.append(("Ausgeglichen", Decimal("0")))
+
+        if balance > 0:
+            nk_rows.append(("Noch zu zahlen", balance))
+        elif balance < 0:
+            nk_rows.append(("Noch auszuzahlen", -balance))
+        else:
+            nk_rows.append(("Offener Saldo", Decimal("0")))
+
+        nk_y = min(tax_y - 24, sy - 18)
+
+        if nk_y - len(nk_rows) * 15 < 85:
+            footer(page)
+            c.showPage()
+            page += 1
+            nk_y = H - 90
+
+        draw(c, right_x, nk_y,
+             "Nebenkostenabrechnung", 8, True)
+        nk_y -= 17
+
+        for label, value in nk_rows:
+            draw(c, right_x, nk_y, label, 7)
+            draw(c, RIGHT, nk_y, money(value),
+                 7, right=True)
+            nk_y -= 15
+
+        tax_y = min(tax_y, nk_y - 8)
 
     bank_y = tax_y - 12
     if invoice.due_date:

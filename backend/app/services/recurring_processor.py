@@ -59,6 +59,35 @@ def process_recurring_invoice(template_id, scheduled_date):
             .with_for_update()
         ).scalar_one()
 
+        tenant_id = invoice.tenant_id
+        if not isinstance(tenant_id, int) or tenant_id <= 0:
+            raise ValueError("Rechnung ohne gueltigen Mandanten.")
+
+        run_tenant = db.execute(
+            text("""
+                SELECT r.tenant_id
+                FROM recurring_invoice_runs r
+                JOIN recurring_invoices t
+                  ON t.id = r.recurring_invoice_id
+                 AND t.tenant_id = r.tenant_id
+                WHERE r.id = :id
+                  AND r.invoice_id = :invoice_id
+                  AND r.recurring_invoice_id = :template_id
+                  AND r.tenant_id = :tenant_id
+            """),
+            {
+                "id": run_id,
+                "invoice_id": invoice_id,
+                "template_id": template_id,
+                "tenant_id": tenant_id,
+            },
+        ).scalar_one_or_none()
+
+        if run_tenant != tenant_id:
+            raise ValueError(
+                "Mandantenzuordnung von Vorlage, Lauf und Rechnung ungueltig."
+            )
+
         if invoice.status == "draft":
             try:
                 finalize_invoice_core(db, invoice)
@@ -69,9 +98,9 @@ def process_recurring_invoice(template_id, scheduled_date):
                         SET status = 'created',
                             completed_at = now(),
                             error_message = NULL
-                        WHERE id = :id
+                        WHERE id = :id AND tenant_id = :tenant_id
                     """),
-                    {"id": run_id},
+                    {"id": run_id, "tenant_id": tenant_id},
                 )
 
                 db.commit()
@@ -94,7 +123,10 @@ def process_recurring_invoice(template_id, scheduled_date):
 
         current_invoice_status = db.execute(
             select(Invoice.status)
-            .where(Invoice.id == invoice_id)
+            .where(
+                Invoice.id == invoice_id,
+                Invoice.tenant_id == tenant_id,
+            )
         ).scalar_one()
 
         if current_invoice_status not in ("open", "partial", "paid"):
@@ -119,9 +151,9 @@ def process_recurring_invoice(template_id, scheduled_date):
             text("""
                 SELECT email_status
                 FROM recurring_invoice_runs
-                WHERE id = :id
+                WHERE id = :id AND tenant_id = :tenant_id
             """),
-            {"id": run_id},
+            {"id": run_id, "tenant_id": tenant_id},
         ).scalar_one()
 
         if status in ("sent", "sending", "failed"):
@@ -137,11 +169,11 @@ def process_recurring_invoice(template_id, scheduled_date):
             text("""
                 UPDATE recurring_invoice_runs
                 SET email_status = 'sending'
-                WHERE id = :id
+                WHERE id = :id AND tenant_id = :tenant_id
                   AND email_status = 'pending'
                 RETURNING id
             """),
-            {"id": run_id},
+            {"id": run_id, "tenant_id": tenant_id},
         ).scalar_one_or_none()
 
         db.commit()
@@ -158,6 +190,7 @@ def process_recurring_invoice(template_id, scheduled_date):
             delivery = deliver_invoice_email(
                 db,
                 invoice_id,
+                tenant_id=tenant_id,
                 delivery_type="automatic",
             )
         except Exception as error:
@@ -173,10 +206,11 @@ def process_recurring_invoice(template_id, scheduled_date):
                     UPDATE recurring_invoice_runs
                     SET email_status = 'failed',
                         email_error = :error
-                    WHERE id = :id
+                    WHERE id = :id AND tenant_id = :tenant_id
                 """),
                 {
                     "id": run_id,
+                    "tenant_id": tenant_id,
                     "error": str(error),
                 },
             )
@@ -205,9 +239,9 @@ def process_recurring_invoice(template_id, scheduled_date):
                     SET email_status = 'sent',
                         email_error = NULL,
                         email_sent_at = now()
-                    WHERE id = :id
+                    WHERE id = :id AND tenant_id = :tenant_id
                 """),
-                {"id": run_id},
+                {"id": run_id, "tenant_id": tenant_id},
             )
         else:
             db.execute(
@@ -215,10 +249,11 @@ def process_recurring_invoice(template_id, scheduled_date):
                     UPDATE recurring_invoice_runs
                     SET email_status = 'failed',
                         email_error = :error
-                    WHERE id = :id
+                    WHERE id = :id AND tenant_id = :tenant_id
                 """),
                 {
                     "id": run_id,
+                    "tenant_id": tenant_id,
                     "error": delivery.get("error"),
                 },
             )
@@ -244,7 +279,7 @@ def process_all_due(today=None):
     with SessionLocal() as db:
         templates = db.execute(
             text("""
-                SELECT id, start_date, end_date, interval_months
+                SELECT id, tenant_id, start_date, end_date, interval_months
                 FROM recurring_invoices
                 WHERE is_active = true
                 ORDER BY id
@@ -259,17 +294,21 @@ def process_all_due(today=None):
                     SELECT max(scheduled_date)
                     FROM recurring_invoice_runs
                     WHERE recurring_invoice_id = :id
+                      AND tenant_id = :tenant_id
                       AND invoice_id IS NOT NULL
                 """),
-                {"id": template["id"]},
+                {"id": template["id"], "tenant_id": template["tenant_id"]},
             ).scalar_one()
 
             unfinished = db.execute(
                 text("""
                     SELECT r.scheduled_date
                     FROM recurring_invoice_runs r
-                    JOIN invoices i ON i.id = r.invoice_id
+                    JOIN invoices i
+                      ON i.id = r.invoice_id
+                     AND i.tenant_id = r.tenant_id
                     WHERE r.recurring_invoice_id = :id
+                      AND r.tenant_id = :tenant_id
                       AND r.scheduled_date <= :today
                       AND i.status = 'draft'
                     ORDER BY r.scheduled_date
@@ -277,6 +316,7 @@ def process_all_due(today=None):
                 {
                     "id": template["id"],
                     "today": today,
+                    "tenant_id": template["tenant_id"],
                 },
             ).scalars().all()
 
@@ -289,8 +329,11 @@ def process_all_due(today=None):
                 text("""
                     SELECT r.scheduled_date
                     FROM recurring_invoice_runs r
-                    JOIN invoices i ON i.id = r.invoice_id
+                    JOIN invoices i
+                      ON i.id = r.invoice_id
+                     AND i.tenant_id = r.tenant_id
                     WHERE r.recurring_invoice_id = :id
+                      AND r.tenant_id = :tenant_id
                       AND r.scheduled_date <= :today
                       AND r.email_status = 'pending'
                       AND i.status IN ('open', 'partial', 'paid')
@@ -299,6 +342,7 @@ def process_all_due(today=None):
                 {
                     "id": template["id"],
                     "today": today,
+                    "tenant_id": template["tenant_id"],
                 },
             ).scalars().all()
 

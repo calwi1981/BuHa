@@ -8,6 +8,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from app.api.accounting import router as accounting_router
 from app.api.invoices import router as invoices_router
+from app.api.manual_bookings import router as manual_bookings_router
 from app.api.xrechnung import router as xrechnung_router
 from app.api.partners import router as partners_router
 from app.api.accounts import router as accounts_router
@@ -15,6 +16,10 @@ from app.api.products import router as products_router
 from fastapi import FastAPI
 
 from app.api.auth import router as auth_router
+from app.api.tenants import router as tenants_router
+from app.api.system import router as system_router
+from app.api.payment_accounts import router as payment_accounts_router
+from app.api.payment_account_transfers import router as payment_account_transfers_router
 
 
 app = FastAPI(
@@ -28,9 +33,14 @@ app = FastAPI(
 configure_request_security(app)
 
 app.include_router(auth_router)
+app.include_router(tenants_router)
+app.include_router(system_router)
 app.include_router(administration_router)
 app.include_router(accounting_router)
+app.include_router(payment_accounts_router)
+app.include_router(payment_account_transfers_router)
 app.include_router(invoices_router)
+app.include_router(manual_bookings_router)
 app.include_router(recurring_invoices_router)
 app.include_router(xrechnung_router)
 app.include_router(invoice_pdf_router)

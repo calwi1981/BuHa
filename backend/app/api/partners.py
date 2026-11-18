@@ -3,7 +3,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
-from app.api.dependencies import CurrentUser, DatabaseSession
+from app.api.dependencies import TenantUser, DatabaseSession
 from app.models.partner import Partner
 
 router = APIRouter(prefix="/api/partners", tags=["Partner"])
@@ -38,27 +38,27 @@ def serialize(item):
 
 
 @router.get("")
-def list_partners(db: DatabaseSession, user: CurrentUser):
+def list_partners(db: DatabaseSession, user: TenantUser):
     items = db.scalars(
-        select(Partner).order_by(Partner.name, Partner.id)
+        select(Partner).where(Partner.tenant_id == user.tenant_id).order_by(Partner.name, Partner.id)
     ).all()
     return [serialize(item) for item in items]
 
 
 @router.get("/{item_id}")
-def get_partner(item_id: int, db: DatabaseSession, user: CurrentUser):
-    item = db.get(Partner, item_id)
+def get_partner(item_id: int, db: DatabaseSession, user: TenantUser):
+    item = db.scalar(select(Partner).where(Partner.id == item_id, Partner.tenant_id == user.tenant_id))
     if item is None:
         raise HTTPException(404, "Partner nicht gefunden.")
     return serialize(item)
 
 
 @router.post("", status_code=201)
-def create_partner(data: PartnerData, db: DatabaseSession, user: CurrentUser):
+def create_partner(data: PartnerData, db: DatabaseSession, user: TenantUser):
     if not data.is_customer and not data.is_supplier:
         raise HTTPException(422, "Kunde oder Lieferant muss aktiviert sein.")
 
-    item = Partner(**data.model_dump())
+    item = Partner(tenant_id=user.tenant_id, **data.model_dump())
     db.add(item)
 
     try:
@@ -76,9 +76,9 @@ def update_partner(
     item_id: int,
     data: PartnerData,
     db: DatabaseSession,
-    user: CurrentUser,
+    user: TenantUser,
 ):
-    item = db.get(Partner, item_id)
+    item = db.scalar(select(Partner).where(Partner.id == item_id, Partner.tenant_id == user.tenant_id))
     if item is None:
         raise HTTPException(404, "Partner nicht gefunden.")
 

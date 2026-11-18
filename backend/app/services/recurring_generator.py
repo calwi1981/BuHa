@@ -43,6 +43,10 @@ def create_recurring_draft(db, template_id, scheduled_date):
     if template is None:
         raise ValueError("Wiederkehrende Vorlage nicht gefunden.")
 
+    tenant_id = template["tenant_id"]
+    if not isinstance(tenant_id, int) or tenant_id <= 0:
+        raise ValueError("Vorlage ohne gueltigen Mandanten.")
+
     if not template["is_active"]:
         raise ValueError("Wiederkehrende Vorlage ist inaktiv.")
 
@@ -51,10 +55,12 @@ def create_recurring_draft(db, template_id, scheduled_date):
             SELECT id, invoice_id
             FROM recurring_invoice_runs
             WHERE recurring_invoice_id = :id
+              AND tenant_id = :tenant_id
               AND scheduled_date = :scheduled_date
         """),
         {
             "id": template_id,
+            "tenant_id": tenant_id,
             "scheduled_date": scheduled_date,
         },
     ).mappings().first()
@@ -66,7 +72,12 @@ def create_recurring_draft(db, template_id, scheduled_date):
             "invoice_id": existing["invoice_id"],
         }
 
-    partner = db.get(Partner, template["partner_id"])
+    partner = db.scalar(
+        select(Partner).where(
+            Partner.id == template["partner_id"],
+            Partner.tenant_id == tenant_id,
+        )
+    )
 
     if (
         partner is None
@@ -80,9 +91,10 @@ def create_recurring_draft(db, template_id, scheduled_date):
             SELECT product_id, quantity, position
             FROM recurring_invoice_lines
             WHERE recurring_invoice_id = :id
+              AND tenant_id = :tenant_id
             ORDER BY position
         """),
-        {"id": template_id},
+        {"id": template_id, "tenant_id": tenant_id},
     ).mappings().all()
 
     if not positions:
@@ -91,7 +103,12 @@ def create_recurring_draft(db, template_id, scheduled_date):
     prepared = []
 
     for position in positions:
-        product = db.get(Product, position["product_id"])
+        product = db.scalar(
+            select(Product).where(
+                Product.id == position["product_id"],
+                Product.tenant_id == tenant_id,
+            )
+        )
 
         if product is None or not product.is_active:
             raise ValueError(
@@ -118,6 +135,7 @@ def create_recurring_draft(db, template_id, scheduled_date):
         })
 
     invoice = Invoice(
+        tenant_id=tenant_id,
         invoice_number="DRAFT-" + uuid4().hex,
         invoice_type="outgoing",
         partner_id=partner.id,
@@ -173,12 +191,14 @@ def create_recurring_draft(db, template_id, scheduled_date):
         text("""
             INSERT INTO recurring_invoice_runs (
                 recurring_invoice_id,
+                tenant_id,
                 scheduled_date,
                 invoice_id,
                 status
             )
             VALUES (
                 :template_id,
+                :tenant_id,
                 :scheduled_date,
                 :invoice_id,
                 'pending'
@@ -187,6 +207,7 @@ def create_recurring_draft(db, template_id, scheduled_date):
         """),
         {
             "template_id": template_id,
+            "tenant_id": tenant_id,
             "scheduled_date": scheduled_date,
             "invoice_id": invoice.id,
         },

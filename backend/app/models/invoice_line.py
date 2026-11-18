@@ -1,3 +1,5 @@
+from decimal import Decimal as UtilityDecimal
+from sqlalchemy import Numeric as UtilityNumeric
 from decimal import Decimal
 from sqlalchemy import ForeignKey, Integer, Numeric, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
@@ -31,4 +33,8 @@ class InvoiceLine(Base):
     )
     net_total: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
     vat_total: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    utility_total_cost: Mapped[UtilityDecimal | None] = mapped_column(UtilityNumeric(12, 2), nullable=True)
+    utility_total_key: Mapped[UtilityDecimal | None] = mapped_column(UtilityNumeric(18, 6), nullable=True)
+    utility_tenant_key: Mapped[UtilityDecimal | None] = mapped_column(UtilityNumeric(18, 6), nullable=True)
+
     gross_total: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)

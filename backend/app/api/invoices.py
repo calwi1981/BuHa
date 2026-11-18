@@ -9,13 +9,14 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
-from app.api.dependencies import CurrentUser, DatabaseSession
+from app.api.dependencies import CurrentUser, DatabaseSession, TenantUser
 from app.models.account import Account
 from app.models.invoice import Invoice
 from app.models.invoice_line import InvoiceLine
 from app.models.partner import Partner
 from app.models.product import Product
 from app.models.payment import Payment
+from app.models.payment_account import PaymentAccount
 
 router = APIRouter(prefix="/api/invoices", tags=["Rechnungen"])
 
@@ -68,6 +69,9 @@ class LineData(BaseModel):
                 raise ValueError("Festrabatt ueber Positionswert.")
 
         return self
+    utility_total_cost: Decimal | None = None
+    utility_total_key: Decimal | None = None
+    utility_tenant_key: Decimal | None = None
 
 
 class InvoiceData(BaseModel):
@@ -93,16 +97,34 @@ class InvoiceData(BaseModel):
         if self.due_date and self.due_date < self.invoice_date:
             raise ValueError("Faelligkeit liegt vor Rechnungsdatum.")
         return self
+    utility_period_from: date | None = None
+    utility_period_to: date | None = None
+    utility_prepayments: Decimal | None = None
+    utility_account_id: int | None = None
 
 
 class PaymentData(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    payment_account_id: int = Field(gt=0)
     payment_date: date
-    amount: Decimal = Field(gt=0, max_digits=14, decimal_places=2)
+    amount: Decimal = Field(max_digits=14, decimal_places=2)
     payment_method: str = Field(min_length=1, max_length=30)
     reference: str | None = Field(default=None, max_length=255)
     notes: str | None = None
+
+
+def payable_invoice_total(invoice):
+    """Zahlbarer Betrag; Vorauszahlungen sind keine Rabatte."""
+    if invoice.utility_period_from is not None:
+        difference = invoice.utility_difference
+        if difference is None:
+            raise HTTPException(
+                422, "Nebenkostenabrechnung ist unvollstaendig."
+            )
+        return money(max(Decimal("0"), Decimal(str(difference))))
+
+    return money(invoice.gross_total)
 
 
 def serialize_invoice(db, invoice):
@@ -134,7 +156,26 @@ def serialize_invoice(db, invoice):
         "vat_total": invoice.vat_total,
         "gross_total": invoice.gross_total,
         "paid_total": paid,
-        "open_total": money(invoice.gross_total - paid),
+        "open_total": money(
+            (
+                invoice.utility_difference
+                if invoice.utility_period_from is not None
+                else invoice.gross_total
+            ) - paid
+        ),
+        "utility_account_id": invoice.utility_account_id,
+        "utility_period_from": invoice.utility_period_from,
+        "utility_period_to": invoice.utility_period_to,
+        "utility_prepayments": invoice.utility_prepayments,
+        "utility_total_cost": invoice.utility_total_cost,
+        "utility_difference": invoice.utility_difference,
+        "utility_credit_total": (
+            money(-invoice.utility_difference)
+            if invoice.utility_period_from is not None
+            and invoice.utility_difference is not None
+            and invoice.utility_difference < 0
+            else Decimal("0.00")
+        ),
         "notes": invoice.notes,
         "xrechnung_enabled": invoice.xrechnung_enabled,
         "xrechnung_buyer_reference": invoice.xrechnung_buyer_reference,
@@ -156,9 +197,15 @@ def serialize_invoice(db, invoice):
 
 
 @router.get("")
-def list_invoices(db: DatabaseSession, user: CurrentUser):
+def list_invoices(
+    db: DatabaseSession,
+    user: CurrentUser,
+    tenant: TenantUser,
+):
     invoices = db.scalars(
-        select(Invoice).order_by(Invoice.invoice_date.desc(), Invoice.id.desc())
+        select(Invoice)
+        .where(Invoice.tenant_id == tenant.tenant_id)
+        .order_by(Invoice.invoice_date.desc(), Invoice.id.desc())
     ).all()
 
     return [serialize_invoice(db, invoice) for invoice in invoices]
@@ -169,8 +216,15 @@ def get_invoice(
     invoice_id: int,
     db: DatabaseSession,
     user: CurrentUser,
+    tenant: TenantUser,
 ):
-    invoice = db.get(Invoice, invoice_id)
+    invoice = db.scalar(
+        select(Invoice).where(
+            Invoice.id == invoice_id,
+            Invoice.tenant_id == tenant.tenant_id,
+        )
+    )
+
     if invoice is None:
         raise HTTPException(404, "Rechnung nicht gefunden.")
 
@@ -182,13 +236,14 @@ def create_invoice(
     data: InvoiceData,
     db: DatabaseSession,
     user: CurrentUser,
+    tenant: TenantUser,
 ):
     if data.invoice_type not in {"outgoing", "incoming"}:
         raise HTTPException(422, "Ungueltige Rechnungsart.")
 
     partner = db.get(Partner, data.partner_id)
 
-    if partner is None or not partner.is_active:
+    if partner is None or partner.tenant_id != tenant.tenant_id or not partner.is_active:
         raise HTTPException(422, "Geschaeftspartner nicht vorhanden.")
 
     if data.invoice_type == "outgoing" and not partner.is_customer:
@@ -200,7 +255,7 @@ def create_invoice(
     for line in data.lines:
         if line.product_id is not None:
             product = db.get(Product, line.product_id)
-            if product is None or not product.is_active:
+            if product is None or product.tenant_id != tenant.tenant_id or not product.is_active:
                 raise HTTPException(
                     422, "Produkt nicht vorhanden oder inaktiv."
                 )
@@ -213,12 +268,129 @@ def create_invoice(
 
             if (
                 account is None
+                or account.tenant_id != tenant.tenant_id
                 or not account.is_active
                 or account.account_type != expected_type
             ):
                 raise HTTPException(422, "Unpassendes Buchungskonto.")
 
+
+    # Nebenkosten werden nur bei entsprechend gekennzeichneten
+    # Ausgangsrechnungen berechnet.
+    utility_requested = any((
+        data.utility_period_from is not None,
+        data.utility_period_to is not None,
+        data.utility_prepayments is not None,
+        any(
+            line.utility_total_cost is not None
+            or line.utility_total_key is not None
+            or line.utility_tenant_key is not None
+            for line in data.lines
+        ),
+    ))
+
+    utility_result = None
+
+    if utility_requested:
+        if data.invoice_type != "outgoing":
+            raise HTTPException(
+                422, "Nebenkosten nur für Ausgangsrechnungen."
+            )
+
+        if (
+            data.utility_period_from is None
+            or data.utility_period_to is None
+            or data.utility_period_from > data.utility_period_to
+        ):
+            raise HTTPException(
+                422, "Ungültiger Nebenkosten-Abrechnungszeitraum."
+            )
+
+        if data.utility_prepayments is None:
+            raise HTTPException(
+                422, "Vorauszahlungen müssen angegeben werden."
+            )
+
+        from app.services.utility_calculation import (
+            calculate_utility_statement,
+        )
+
+        try:
+            utility_result = calculate_utility_statement(
+                [
+                    {
+                        "description": line.description,
+                        "total_cost": line.utility_total_cost,
+                        "total_key": line.utility_total_key,
+                        "tenant_key": line.utility_tenant_key,
+                    }
+                    for line in data.lines
+                ],
+                data.utility_prepayments,
+            )
+        except (ValueError, TypeError, KeyError, ArithmeticError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+        for line, calculated in zip(
+            data.lines, utility_result["positions"]
+        ):
+            if (
+                money(line.quantity * line.unit_net_price)
+                != calculated["tenant_share"]
+            ):
+                raise HTTPException(
+                    422,
+                    "Der Rechnungspositionsbetrag muss dem "
+                    "berechneten Nebenkostenanteil entsprechen."
+                )
+
+
+    if utility_requested:
+        if data.utility_account_id is None:
+            raise HTTPException(
+                422, "NK-Buchungskonto ist erforderlich."
+            )
+        utility_account = db.scalar(
+            select(Account).where(
+                Account.id == data.utility_account_id,
+                Account.tenant_id == tenant.tenant_id,
+                Account.is_active.is_(True),
+                Account.account_type == "income",
+            )
+        )
+        if utility_account is None:
+            raise HTTPException(
+                422, "Ungueltiges NK-Einnahmenkonto."
+            )
+    elif data.utility_account_id is not None:
+        raise HTTPException(
+            422, "NK-Buchungskonto nur fuer Nebenkostenabrechnungen."
+        )
+
     invoice = Invoice(
+        utility_account_id=(
+            data.utility_account_id if utility_requested else None
+        ),
+        utility_period_from=(
+            data.utility_period_from if utility_requested else None
+        ),
+        utility_period_to=(
+            data.utility_period_to if utility_requested else None
+        ),
+        utility_prepayments=(
+            utility_result["prepayments"]
+            if utility_result is not None else None
+        ),
+        utility_total_cost=(
+            utility_result["total_tenant_cost"]
+            if utility_result is not None else None
+        ),
+        utility_difference=(
+            utility_result["difference"]
+            if utility_result is not None else None
+        ),
+
+        tenant_id=tenant.tenant_id,
         invoice_number="DRAFT-" + uuid4().hex,
         supplier_reference=data.supplier_reference
         if data.invoice_type == "incoming" else None,
@@ -281,6 +453,18 @@ def create_invoice(
                     discount_type=line.discount_type,
                     discount_value=line.discount_value,
                     account_id=line.account_id,
+                    utility_total_cost=(
+                        line.utility_total_cost
+                        if utility_requested else None
+                    ),
+                    utility_total_key=(
+                        line.utility_total_key
+                        if utility_requested else None
+                    ),
+                    utility_tenant_key=(
+                        line.utility_tenant_key
+                        if utility_requested else None
+                    ),
                     net_total=net,
                     vat_total=vat,
                     gross_total=gross,
@@ -316,8 +500,86 @@ def next_invoice_number(db, invoice):
     outgoing = invoice.invoice_type == "outgoing"
 
     settings = db.execute(
-        text("SELECT settings FROM company_settings WHERE id=1")
+        text("SELECT settings FROM company_settings WHERE tenant_id=:tenant_id"), {"tenant_id": invoice.tenant_id}
     ).scalar_one_or_none() or {}
+
+
+    if outgoing and invoice.utility_period_from is not None:
+        partner = db.get(Partner, invoice.partner_id)
+        if partner is None or partner.tenant_id != invoice.tenant_id:
+            raise HTTPException(422, "Mieter nicht vorhanden.")
+
+        prefix = settings.get("utility_invoice_prefix", "NK")
+        digits = int(settings.get("utility_invoice_digits", 1))
+        minimum = int(settings.get("utility_invoice_next", 1))
+        year = invoice.utility_period_to.year
+
+        partner_number = str(partner.partner_number).strip()
+        if not partner_number or len(partner_number) > 50 or any(ord(char) < 32 or ord(char) == 127 for char in partner_number):
+            raise HTTPException(
+                422, "Mieternummer enthält unzulässige Zeichen."
+            )
+
+        stem = f"{prefix}-{year}-{partner_number}-"
+        kind = "utility"
+
+        row = db.execute(
+            text("""
+                SELECT last_number FROM invoice_sequences
+                WHERE tenant_id=:tenant_id
+                  AND invoice_type=:kind
+                  AND year=:year
+                FOR UPDATE
+            """),
+            {
+                "tenant_id": invoice.tenant_id,
+                "kind": kind,
+                "year": year,
+            },
+        ).first()
+
+        last = row[0] if row else 0
+        candidate = max(last + 1, minimum)
+
+        while True:
+            number = stem + str(candidate).zfill(digits)
+            occupied = db.execute(
+                text("""
+                    SELECT 1 FROM invoices
+                    WHERE tenant_id=:tenant_id
+                      AND invoice_number=:number
+                    UNION ALL
+                    SELECT 1 FROM manual_bookings
+                    WHERE tenant_id=:tenant_id
+                      AND booking_number=:number
+                """),
+                {
+                    "tenant_id": invoice.tenant_id,
+                    "number": number,
+                },
+            ).first()
+
+            if not occupied:
+                break
+            candidate += 1
+
+        db.execute(
+            text("""
+                INSERT INTO invoice_sequences
+                    (tenant_id, invoice_type, year, last_number)
+                VALUES (:tenant_id, :kind, :year, :number)
+                ON CONFLICT (tenant_id, invoice_type, year)
+                DO UPDATE SET last_number=EXCLUDED.last_number
+            """),
+            {
+                "tenant_id": invoice.tenant_id,
+                "kind": kind,
+                "year": year,
+                "number": candidate,
+            },
+        )
+
+        return number
 
     if outgoing:
         prefix = settings.get("invoice_prefix", "RE")
@@ -336,10 +598,10 @@ def next_invoice_number(db, invoice):
         text("""
             SELECT last_number
             FROM invoice_sequences
-            WHERE invoice_type=:kind AND year=:year
+            WHERE tenant_id=:tenant_id AND invoice_type=:kind AND year=:year
             FOR UPDATE
         """),
-        {"kind": invoice.invoice_type, "year": year},
+        {"tenant_id": invoice.tenant_id, "kind": invoice.invoice_type, "year": year},
     ).first()
 
     last = row[0] if row else 0
@@ -348,9 +610,9 @@ def next_invoice_number(db, invoice):
         text("""
             SELECT invoice_number
             FROM invoices
-            WHERE invoice_number LIKE :pattern
+            WHERE tenant_id=:tenant_id AND invoice_number LIKE :pattern
         """),
-        {"pattern": stem + "%"},
+        {"tenant_id": invoice.tenant_id, "pattern": stem + "%"},
     ).scalars().all()
 
     for number in existing:
@@ -367,9 +629,12 @@ def next_invoice_number(db, invoice):
         occupied = db.execute(
             text("""
                 SELECT 1 FROM invoices
-                WHERE invoice_number=:number
+                WHERE tenant_id=:tenant_id AND invoice_number=:number
+                UNION ALL
+                SELECT 1 FROM manual_bookings
+                WHERE tenant_id=:tenant_id AND booking_number=:number
             """),
-            {"number": number},
+            {"tenant_id": invoice.tenant_id, "number": number},
         ).first()
         if not occupied:
             break
@@ -378,12 +643,13 @@ def next_invoice_number(db, invoice):
     db.execute(
         text("""
             INSERT INTO invoice_sequences
-                (invoice_type, year, last_number)
-            VALUES (:kind, :year, :number)
-            ON CONFLICT (invoice_type, year)
+                (tenant_id, invoice_type, year, last_number)
+            VALUES (:tenant_id, :kind, :year, :number)
+            ON CONFLICT (tenant_id, invoice_type, year)
             DO UPDATE SET last_number=EXCLUDED.last_number
         """),
         {
+            "tenant_id": invoice.tenant_id,
             "kind": invoice.invoice_type,
             "year": year,
             "number": candidate,
@@ -401,7 +667,17 @@ def finalize_invoice_core(db, invoice):
         raise HTTPException(422, "Rechnungsbetrag muss positiv sein.")
 
     invoice.invoice_number = next_invoice_number(db, invoice)
-    invoice.status = "open"
+
+    if invoice.utility_period_from is not None:
+        if invoice.utility_difference is None:
+            raise HTTPException(
+                422, "Nebenkostenabrechnung ist unvollstaendig."
+            )
+        # Jede freigegebene Nebenkostenabrechnung bleibt offen,
+        # bis der Zahlungsausgleich tatsächlich gebucht wurde.
+        invoice.status = "open"
+    else:
+        invoice.status = "open"
 
     if (
         invoice.invoice_type == "outgoing"
@@ -427,7 +703,7 @@ def finalize_invoice_core(db, invoice):
                 invoice,
                 partner,
                 lines,
-                load_settings(db),
+                load_settings(db, invoice.tenant_id),
             )
             validate_xrechnung(xml)
 
@@ -447,10 +723,14 @@ def finalize_invoice(
     invoice_id: int,
     db: DatabaseSession,
     user: CurrentUser,
+    tenant: TenantUser,
 ):
     invoice = db.execute(
         select(Invoice)
-        .where(Invoice.id == invoice_id)
+        .where(
+            Invoice.id == invoice_id,
+            Invoice.tenant_id == tenant.tenant_id,
+        )
         .with_for_update()
     ).scalar_one_or_none()
 
@@ -475,7 +755,7 @@ def finalize_invoice(
         from app.services.invoice_email import deliver_invoice_email
 
         try:
-            settings = load_settings(db)
+            settings = load_settings(db, tenant.tenant_id)
             auto_send = settings.get(
                 "invoice_auto_send_enabled", False
             ) is True
@@ -484,6 +764,7 @@ def finalize_invoice(
                 result["email_delivery"] = deliver_invoice_email(
                     db,
                     invoice.id,
+                    tenant_id=tenant.tenant_id,
                     delivery_type="automatic",
                 )
             else:
@@ -512,10 +793,16 @@ def send_invoice_xrechnung(
     invoice_id: int,
     db: DatabaseSession,
     user: CurrentUser,
+    tenant: TenantUser,
 ):
     from app.services.invoice_email import deliver_invoice_email
 
-    invoice = db.get(Invoice, invoice_id)
+    invoice = db.scalar(
+        select(Invoice).where(
+            Invoice.id == invoice_id,
+            Invoice.tenant_id == tenant.tenant_id,
+        )
+    )
 
     if invoice is None:
         raise HTTPException(404, "Rechnung nicht gefunden.")
@@ -529,6 +816,7 @@ def send_invoice_xrechnung(
     result = deliver_invoice_email(
         db,
         invoice_id,
+        tenant_id=tenant.tenant_id,
         delivery_type="manual",
         force_xrechnung=True,
     )
@@ -548,10 +836,14 @@ def add_payment(
     data: PaymentData,
     db: DatabaseSession,
     user: CurrentUser,
+    tenant: TenantUser,
 ):
     invoice = db.execute(
         select(Invoice)
-        .where(Invoice.id == invoice_id)
+        .where(
+            Invoice.id == invoice_id,
+            Invoice.tenant_id == tenant.tenant_id,
+        )
         .with_for_update()
     ).scalar_one_or_none()
 
@@ -560,6 +852,21 @@ def add_payment(
 
     if invoice.status not in {"open", "partial"}:
         raise HTTPException(409, "Rechnung ist nicht zahlbar.")
+
+    payment_account = db.scalar(
+        select(PaymentAccount).where(
+            PaymentAccount.id == data.payment_account_id,
+            PaymentAccount.tenant_id == tenant.tenant_id,
+            PaymentAccount.is_active.is_(True),
+        )
+    )
+
+    if payment_account is None:
+        raise HTTPException(
+            422,
+            "Zahlungskonto nicht gefunden, inaktiv oder "
+            "nicht diesem Mandanten zugeordnet.",
+        )
 
     payments = db.scalars(
         select(Payment).where(Payment.invoice_id == invoice_id)
@@ -570,8 +877,51 @@ def add_payment(
         Decimal("0"),
     )
 
-    if money(total_paid + data.amount) > invoice.gross_total:
-        raise HTTPException(422, "Zahlung uebersteigt offenen Betrag.")
+    is_utility = invoice.utility_period_from is not None
+
+    if is_utility:
+        if invoice.utility_difference is None:
+            raise HTTPException(
+                422, "Nebenkostenabrechnung unvollstaendig."
+            )
+
+        target = money(invoice.utility_difference)
+        new_paid = money(total_paid + data.amount)
+
+        if target > 0:
+            if data.amount <= 0:
+                raise HTTPException(
+                    422, "Nachzahlung erfordert einen Zahlungseingang."
+                )
+            if new_paid > target:
+                raise HTTPException(
+                    422, "Zahlung uebersteigt Nachzahlung."
+                )
+
+        elif target < 0:
+            if data.amount >= 0:
+                raise HTTPException(
+                    422, "Guthaben erfordert eine Auszahlung."
+                )
+            if new_paid < target:
+                raise HTTPException(
+                    422, "Auszahlung uebersteigt Guthaben."
+                )
+
+        else:
+            if data.amount != 0 or total_paid != 0:
+                raise HTTPException(
+                    422, "Nullsaldo erlaubt nur einen Ausgleich."
+                )
+    else:
+        if data.amount <= 0:
+            raise HTTPException(
+                422, "Zahlungsbetrag muss positiv sein."
+            )
+        if money(total_paid + data.amount) > invoice.gross_total:
+            raise HTTPException(
+                422, "Zahlung uebersteigt offenen Betrag."
+            )
 
     payment = Payment(
         invoice_id=invoice.id,
@@ -581,9 +931,12 @@ def add_payment(
     db.add(payment)
 
     new_paid = money(total_paid + data.amount)
-    invoice.status = (
-        "paid" if new_paid == invoice.gross_total else "partial"
+    target = (
+        money(invoice.utility_difference)
+        if invoice.utility_period_from is not None
+        else money(invoice.gross_total)
     )
+    invoice.status = "paid" if new_paid == target else "partial"
 
     db.commit()
 
@@ -596,10 +949,14 @@ def update_invoice_draft(
     data: InvoiceData,
     db: DatabaseSession,
     user: CurrentUser,
+    tenant: TenantUser,
 ):
     invoice = db.execute(
         select(Invoice)
-        .where(Invoice.id == invoice_id)
+        .where(
+            Invoice.id == invoice_id,
+            Invoice.tenant_id == tenant.tenant_id,
+        )
         .with_for_update()
     ).scalar_one_or_none()
 
@@ -620,7 +977,7 @@ def update_invoice_draft(
 
     partner = db.get(Partner, data.partner_id)
 
-    if partner is None or not partner.is_active:
+    if partner is None or partner.tenant_id != tenant.tenant_id or not partner.is_active:
         raise HTTPException(422, "Geschaeftspartner nicht vorhanden.")
 
     if data.invoice_type == "outgoing" and not partner.is_customer:
@@ -628,6 +985,98 @@ def update_invoice_draft(
 
     if data.invoice_type == "incoming" and not partner.is_supplier:
         raise HTTPException(422, "Partner ist kein Lieferant.")
+
+    # Nebenkosten werden nur bei entsprechend gekennzeichneten
+    # Ausgangsrechnungen berechnet.
+    utility_requested = any((
+        data.utility_period_from is not None,
+        data.utility_period_to is not None,
+        data.utility_prepayments is not None,
+        any(
+            line.utility_total_cost is not None
+            or line.utility_total_key is not None
+            or line.utility_tenant_key is not None
+            for line in data.lines
+        ),
+    ))
+
+    utility_result = None
+
+    if utility_requested:
+        if data.invoice_type != "outgoing":
+            raise HTTPException(
+                422, "Nebenkosten nur für Ausgangsrechnungen."
+            )
+
+        if (
+            data.utility_period_from is None
+            or data.utility_period_to is None
+            or data.utility_period_from > data.utility_period_to
+        ):
+            raise HTTPException(
+                422, "Ungültiger Nebenkosten-Abrechnungszeitraum."
+            )
+
+        if data.utility_prepayments is None:
+            raise HTTPException(
+                422, "Vorauszahlungen müssen angegeben werden."
+            )
+
+        from app.services.utility_calculation import (
+            calculate_utility_statement,
+        )
+
+        try:
+            utility_result = calculate_utility_statement(
+                [
+                    {
+                        "description": line.description,
+                        "total_cost": line.utility_total_cost,
+                        "total_key": line.utility_total_key,
+                        "tenant_key": line.utility_tenant_key,
+                    }
+                    for line in data.lines
+                ],
+                data.utility_prepayments,
+            )
+        except (ValueError, TypeError, KeyError, ArithmeticError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+        for line, calculated in zip(
+            data.lines, utility_result["positions"]
+        ):
+            if (
+                money(line.quantity * line.unit_net_price)
+                != calculated["tenant_share"]
+            ):
+                raise HTTPException(
+                    422,
+                    "Der Rechnungspositionsbetrag muss dem "
+                    "berechneten Nebenkostenanteil entsprechen."
+                )
+
+
+    if utility_requested:
+        if data.utility_account_id is None:
+            raise HTTPException(
+                422, "NK-Buchungskonto ist erforderlich."
+            )
+        utility_account = db.scalar(
+            select(Account).where(
+                Account.id == data.utility_account_id,
+                Account.tenant_id == tenant.tenant_id,
+                Account.is_active.is_(True),
+                Account.account_type == "income",
+            )
+        )
+        if utility_account is None:
+            raise HTTPException(
+                422, "Ungueltiges NK-Einnahmenkonto."
+            )
+    elif data.utility_account_id is not None:
+        raise HTTPException(
+            422, "NK-Buchungskonto nur fuer Nebenkostenabrechnungen."
+        )
 
     existing_lines = db.scalars(
         select(InvoiceLine).where(InvoiceLine.invoice_id == invoice.id)
@@ -645,9 +1094,13 @@ def update_invoice_draft(
     for line in data.lines:
         if line.product_id is not None:
             product = db.get(Product, line.product_id)
-            if product is None or (
-                not product.is_active
-                and line.product_id not in existing_product_ids
+            if (
+                product is None
+                or product.tenant_id != tenant.tenant_id
+                or (
+                    not product.is_active
+                    and line.product_id not in existing_product_ids
+                )
             ):
                 raise HTTPException(
                     422, "Produkt nicht vorhanden oder inaktiv."
@@ -661,6 +1114,7 @@ def update_invoice_draft(
 
             if (
                 account is None
+                or account.tenant_id != tenant.tenant_id
                 or (
                     not account.is_active
                     and line.account_id not in existing_account_ids
@@ -669,6 +1123,28 @@ def update_invoice_draft(
             ):
                 raise HTTPException(422, "Unpassendes Buchungskonto.")
 
+
+    invoice.utility_account_id = (
+        data.utility_account_id if utility_requested else None
+    )
+    invoice.utility_period_from = (
+        data.utility_period_from if utility_requested else None
+    )
+    invoice.utility_period_to = (
+        data.utility_period_to if utility_requested else None
+    )
+    invoice.utility_prepayments = (
+        utility_result["prepayments"]
+        if utility_result is not None else None
+    )
+    invoice.utility_total_cost = (
+        utility_result["total_tenant_cost"]
+        if utility_result is not None else None
+    )
+    invoice.utility_difference = (
+        utility_result["difference"]
+        if utility_result is not None else None
+    )
 
     invoice.partner_id = data.partner_id
     invoice.invoice_date = data.invoice_date
@@ -731,6 +1207,18 @@ def update_invoice_draft(
                     discount_type=line.discount_type,
                     discount_value=line.discount_value,
                     account_id=line.account_id,
+                    utility_total_cost=(
+                        line.utility_total_cost
+                        if utility_requested else None
+                    ),
+                    utility_total_key=(
+                        line.utility_total_key
+                        if utility_requested else None
+                    ),
+                    utility_tenant_key=(
+                        line.utility_tenant_key
+                        if utility_requested else None
+                    ),
                     net_total=net,
                     vat_total=vat,
                     gross_total=gross,

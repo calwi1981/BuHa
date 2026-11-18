@@ -1,9 +1,8 @@
-from app.api.dependencies import CurrentUser, DatabaseSession
+from app.api.dependencies import TenantUser, DatabaseSession
 """XRechnung API – XML import preview."""
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 
-from app.api.dependencies import CurrentUser
 from app.services.xrechnung.ubl import (
     UBLParseError,
     parse_ubl_invoice,
@@ -62,7 +61,7 @@ def parse_invoice_xml(content):
 
 @router.post("/incoming/preview")
 async def preview_incoming_xrechnung(
-    user: CurrentUser,
+    user: TenantUser,
     db: DatabaseSession,
     file: UploadFile = File(...),
 ):
@@ -106,6 +105,7 @@ async def preview_incoming_xrechnung(
     supplier_match = match_supplier(
         db,
         result.get("supplier") or {},
+        user.tenant_id,
     )
 
     result["supplier_match"] = supplier_match
@@ -114,6 +114,7 @@ async def preview_incoming_xrechnung(
         db,
         supplier_match.get("partner_id"),
         result.get("invoice_number"),
+        user.tenant_id,
     )
 
     from app.services.xrechnung.import_prepare import (
@@ -134,7 +135,7 @@ async def preview_incoming_xrechnung(
 
 @router.post("/incoming/import", status_code=201)
 async def import_incoming_xrechnung(
-    user: CurrentUser,
+    user: TenantUser,
     db: DatabaseSession,
     file: UploadFile = File(...),
     partner_id: int = Form(...),
@@ -192,6 +193,7 @@ async def import_incoming_xrechnung(
             original_filename=filename,
             partner_id=partner_id,
             account_id=account_id,
+            tenant_id=user.tenant_id,
         )
 
     except XRechnungImportError as exc:

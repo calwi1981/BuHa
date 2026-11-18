@@ -1,13 +1,16 @@
 from datetime import datetime, timezone
-from sqlalchemy import Boolean, DateTime, Integer, String, Text
+from sqlalchemy import UniqueConstraint, ForeignKey, Boolean, DateTime, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 from app.core.database import Base
 
 class Partner(Base):
     __tablename__ = "partners"
+    __table_args__ = (UniqueConstraint("tenant_id", "partner_number", name="uq_partners_tenant_partner_number"),)
+
+    tenant_id: Mapped[int] = mapped_column(ForeignKey("tenants.id", ondelete="RESTRICT"), nullable=False, index=True)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    partner_number: Mapped[str] = mapped_column(String(50), unique=True, nullable=False)
+    partner_number: Mapped[str] = mapped_column(String(50), nullable=False)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     is_customer: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     is_supplier: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)

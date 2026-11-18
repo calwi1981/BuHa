@@ -8,7 +8,7 @@ from fastapi.responses import Response
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import text
 
-from app.api.dependencies import AdminUser, CurrentUser, DatabaseSession
+from app.api.dependencies import DatabaseSession, TenantAdmin, TenantUser
 
 router = APIRouter(prefix="/api/administration", tags=["Administration"])
 
@@ -38,6 +38,15 @@ FIELDS = {
     "incoming_digits",
     "invoice_next",
     "incoming_next",
+    "booking_income_prefix",
+    "booking_income_digits",
+    "booking_income_next",
+    "booking_expense_prefix",
+    "booking_expense_digits",
+    "booking_expense_next",
+    "utility_invoice_prefix",
+    "utility_invoice_digits",
+    "utility_invoice_next",
 
     "bank_opening_balance",
     "bank_opening_date",
@@ -69,6 +78,15 @@ DEFAULTS = {
     "incoming_digits": 4,
     "invoice_next": 1,
     "incoming_next": 1,
+    "booking_income_prefix": "E",
+    "booking_income_digits": 4,
+    "booking_income_next": 1,
+    "booking_expense_prefix": "A",
+    "booking_expense_digits": 4,
+    "booking_expense_next": 1,
+    "utility_invoice_prefix": "NK",
+    "utility_invoice_digits": 1,
+    "utility_invoice_next": 1,
 
     "bank_opening_balance": "0.00",
     "bank_opening_date": "",
@@ -201,18 +219,33 @@ def smtp_validate_settings(values):
 
     return values
 
-def load_settings(db):
+def load_settings(db, tenant_id: int):
+    if not isinstance(tenant_id, int) or tenant_id <= 0:
+        raise ValueError("Gueltige Mandanten-ID erforderlich.")
+
     row = db.execute(
-        text("SELECT settings FROM company_settings WHERE id=1")
+        text(
+            "SELECT settings FROM company_settings "
+            "WHERE tenant_id=:tenant_id"
+        ),
+        {"tenant_id": tenant_id},
     ).scalar_one_or_none()
-    return {**DEFAULTS, **(row or {})}
+
+    if row is None:
+        raise ValueError("Mandanteneinstellungen nicht vorhanden.")
+
+    return {**DEFAULTS, **row}
 
 
 @router.get("")
-def get_settings(db: DatabaseSession, user: AdminUser):
-    settings = load_settings(db)
+def get_settings(db: DatabaseSession, tenant: TenantAdmin):
+    settings = load_settings(db, tenant.tenant_id)
     has_logo = db.execute(
-        text("SELECT logo IS NOT NULL FROM company_settings WHERE id=1")
+        text(
+            "SELECT logo IS NOT NULL FROM company_settings "
+            "WHERE tenant_id=:tenant_id"
+        ),
+        {"tenant_id": tenant.tenant_id},
     ).scalar_one()
     return {"values": smtp_public_settings(settings), "has_logo": has_logo}
 
@@ -221,7 +254,7 @@ def get_settings(db: DatabaseSession, user: AdminUser):
 def save_settings(
     data: SettingsData,
     db: DatabaseSession,
-    user: AdminUser,
+    tenant: TenantAdmin,
 ):
     unknown = set(data.values) - FIELDS
     if unknown:
@@ -231,12 +264,18 @@ def save_settings(
         text("SELECT pg_advisory_xact_lock(127001)")
     )
 
-    settings = load_settings(db)
+    settings = load_settings(db, tenant.tenant_id)
 
     for key, value in data.values.items():
         if key in {
             "invoice_digits", "incoming_digits",
+            "booking_income_digits",
+            "booking_expense_digits",
+            "utility_invoice_digits",
             "invoice_next", "incoming_next",
+            "booking_income_next",
+            "booking_expense_next",
+            "utility_invoice_next",
         }:
             if isinstance(value, bool):
                 raise HTTPException(422, "Ungültiger Zahlenwert.")
@@ -245,7 +284,10 @@ def save_settings(
             except (TypeError, ValueError):
                 raise HTTPException(422, "Ungültiger Zahlenwert.")
 
-            if key.endswith("_digits") and not 3 <= value <= 8:
+            if key == "utility_invoice_digits":
+                if not 1 <= value <= 8:
+                    raise HTTPException(422, "NK-Stellenzahl muss 1 bis 8 sein.")
+            elif key.endswith("_digits") and not 3 <= value <= 8:
                 raise HTTPException(422, "Stellenzahl muss 3 bis 8 sein.")
 
             if key.endswith("_next") and value < 1:
@@ -285,7 +327,7 @@ def save_settings(
                     422, "Bankstichtag muss JJJJ-MM-TT sein."
                 )
 
-        if key in {"invoice_prefix", "incoming_prefix"}:
+        if key in {"invoice_prefix", "incoming_prefix", "utility_invoice_prefix", "booking_income_prefix", "booking_expense_prefix"}:
             if not value.isalpha() or not 1 <= len(value) <= 8:
                 raise HTTPException(422, "Präfix muss aus Buchstaben bestehen.")
             value = value.upper()
@@ -301,9 +343,9 @@ def save_settings(
         text("""
             UPDATE company_settings
             SET settings=CAST(:settings AS jsonb)
-            WHERE id=1
+            WHERE tenant_id=:tenant_id
         """),
-        {"settings": json.dumps(settings)},
+        {"settings": json.dumps(settings), "tenant_id": tenant.tenant_id},
     )
     db.commit()
     return {"values": smtp_public_settings(settings)}
@@ -313,7 +355,7 @@ def save_settings(
 def upload_logo(
     data: LogoData,
     db: DatabaseSession,
-    user: AdminUser,
+    tenant: TenantAdmin,
 ):
     if data.mime not in {"image/png", "image/jpeg"}:
         raise HTTPException(422, "Nur PNG oder JPEG erlaubt.")
@@ -351,21 +393,22 @@ def upload_logo(
         text("""
             UPDATE company_settings
             SET logo=:logo, logo_mime=:mime
-            WHERE id=1
+            WHERE tenant_id=:tenant_id
         """),
-        {"logo": content, "mime": actual},
+        {"logo": content, "mime": actual, "tenant_id": tenant.tenant_id},
     )
     db.commit()
     return {"ok": True}
 
 
 @router.get("/logo")
-def get_logo(db: DatabaseSession, user: CurrentUser):
+def get_logo(db: DatabaseSession, tenant: TenantUser):
     row = db.execute(
         text("""
             SELECT logo, logo_mime
-            FROM company_settings WHERE id=1
-        """)
+            FROM company_settings WHERE tenant_id=:tenant_id
+        """),
+        {"tenant_id": tenant.tenant_id},
     ).one_or_none()
 
     if not row or row.logo is None:
@@ -409,7 +452,7 @@ def smtp_cipher_buha():
 def save_smtp_password_buha(
     data: SMTPPasswordDataBUHA,
     db: DatabaseSession,
-    user: AdminUser,
+    tenant: TenantAdmin,
 ):
     import json
 
@@ -418,7 +461,7 @@ def save_smtp_password_buha(
         raise HTTPException(422, "Ungültiges SMTP-Passwort.")
 
     db.execute(text("SELECT pg_advisory_xact_lock(127001)"))
-    settings = load_settings(db)
+    settings = load_settings(db, tenant.tenant_id)
 
     if password:
         encrypted = smtp_cipher_buha().encrypt(
@@ -432,9 +475,9 @@ def save_smtp_password_buha(
         text("""
             UPDATE company_settings
             SET settings=CAST(:settings AS jsonb)
-            WHERE id=1
+            WHERE tenant_id=:tenant_id
         """),
-        {"settings": json.dumps(settings)},
+        {"settings": json.dumps(settings), "tenant_id": tenant.tenant_id},
     )
     db.commit()
     return {"ok": True, "password_configured": bool(password)}
@@ -443,9 +486,9 @@ def save_smtp_password_buha(
 @router.get("/smtp/status")
 def smtp_password_status_buha(
     db: DatabaseSession,
-    user: AdminUser,
+    tenant: TenantAdmin,
 ):
-    settings = load_settings(db)
+    settings = load_settings(db, tenant.tenant_id)
     return {
         "password_configured": bool(
             settings.get("smtp_password_encrypted")
@@ -464,7 +507,7 @@ class SMTPTestDataBUHA(SMTPBaseModel):
 def send_smtp_test_buha(
     data: SMTPTestDataBUHA,
     db: DatabaseSession,
-    user: AdminUser,
+    tenant: TenantAdmin,
 ):
     from email_validator import validate_email, EmailNotValidError
 
@@ -476,7 +519,7 @@ def send_smtp_test_buha(
     except EmailNotValidError:
         raise HTTPException(422, "Ungültige Test-E-Mail-Adresse.")
 
-    settings = load_settings(db)
+    settings = load_settings(db, tenant.tenant_id)
 
     try:
         smtp_send_buha(

@@ -27,6 +27,7 @@ def save_incoming_xrechnung(
     original_filename,
     partner_id,
     account_id,
+    tenant_id,
 ):
     """Speichert nur bereits extern validierte Rechnungsdaten.
 
@@ -54,7 +55,7 @@ def save_incoming_xrechnung(
             "Lieferanten-ID oder Buchungskonto ungültig."
         ) from exc
 
-    partner = db.get(Partner, partner_id)
+    partner = db.scalar(select(Partner).where(Partner.id == partner_id, Partner.tenant_id == tenant_id))
 
     if (
         partner is None
@@ -65,7 +66,7 @@ def save_incoming_xrechnung(
             "Der ausgewählte Lieferant ist nicht aktiv oder ungültig."
         )
 
-    account = db.get(Account, account_id)
+    account = db.scalar(select(Account).where(Account.id == account_id, Account.tenant_id == tenant_id))
 
     if (
         account is None
@@ -103,6 +104,7 @@ def save_incoming_xrechnung(
             db,
             partner.id,
             prepared["supplier_reference"],
+            tenant_id,
         )
 
         if duplicate["duplicate"]:
@@ -112,7 +114,10 @@ def save_incoming_xrechnung(
 
         existing_document = db.scalar(
             select(XRechnungDocument).where(
-                XRechnungDocument.sha256 == xml_hash
+                XRechnungDocument.sha256 == xml_hash,
+                XRechnungDocument.invoice_id.in_(
+                    select(Invoice.id).where(Invoice.tenant_id == tenant_id)
+                )
             )
         )
 
@@ -126,6 +131,7 @@ def save_incoming_xrechnung(
         raise
 
     invoice = Invoice(
+        tenant_id=tenant_id,
         invoice_number="DRAFT-" + uuid4().hex,
         invoice_type="incoming",
         supplier_reference=prepared["supplier_reference"],

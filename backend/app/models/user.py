@@ -1,13 +1,14 @@
 from datetime import datetime, timezone
 from enum import Enum
 
-from sqlalchemy import Boolean, DateTime, Enum as SQLEnum, Integer, String
+from sqlalchemy import Boolean, DateTime, Enum as SQLEnum, ForeignKey, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
 
 
 class UserRole(str, Enum):
+    SYSTEM_ADMIN = "system_admin"
     ADMIN = "admin"
     USER = "user"
 
@@ -61,6 +62,7 @@ class User(Base):
         default=lambda: datetime.now(timezone.utc),
         nullable=False,
     )
+
 
     last_login_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),

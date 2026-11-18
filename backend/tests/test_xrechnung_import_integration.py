@@ -13,6 +13,7 @@ from app.models.account import Account
 from app.models.invoice import Invoice
 from app.models.invoice_line import InvoiceLine
 from app.models.partner import Partner
+from app.models.tenant import Tenant
 from app.models.xrechnung_document import XRechnungDocument
 from app.services.xrechnung.import_prepare import XRechnungImportError
 from app.services.xrechnung.import_save import save_incoming_xrechnung
@@ -58,9 +59,16 @@ def run():
                 join_transaction_mode="create_savepoint",
             ) as db:
 
+                tenant = db.scalar(
+                    select(Tenant).where(Tenant.code == "calwi.de")
+                )
+                if tenant is None:
+                    raise RuntimeError("Testmandant calwi.de fehlt.")
+
                 partner = db.scalar(
                     select(Partner)
                     .where(
+                        Partner.tenant_id == tenant.id,
                         Partner.is_active.is_(True),
                         Partner.is_supplier.is_(True),
                     )
@@ -70,6 +78,7 @@ def run():
                 account = db.scalar(
                     select(Account)
                     .where(
+                        Account.tenant_id == tenant.id,
                         Account.is_active.is_(True),
                         Account.account_type == "expense",
                     )
@@ -91,12 +100,14 @@ def run():
                     original_filename="integrationstest.xml",
                     partner_id=partner.id,
                     account_id=account.id,
+                    tenant_id=tenant.id,
                 )
 
                 invoice_id = result["invoice_id"]
 
                 invoice = db.get(Invoice, invoice_id)
                 assert invoice is not None
+                assert invoice.tenant_id == tenant.id
                 assert invoice.invoice_type == "incoming"
                 assert invoice.status == "draft"
                 assert invoice.supplier_reference == reference
@@ -133,6 +144,7 @@ def run():
                         original_filename="integrationstest.xml",
                         partner_id=partner.id,
                         account_id=account.id,
+                    tenant_id=tenant.id,
                     )
                 except XRechnungImportError:
                     print("OK: Doppelimport abgelehnt")

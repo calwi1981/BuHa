@@ -17,11 +17,12 @@ def normalize_vat_id(value):
     )
 
 
-def match_supplier(db, supplier_data):
+def match_supplier(db, supplier_data, tenant_id):
     """Lieferanten anhand USt-ID oder Name und Anschrift zuordnen."""
 
     suppliers = db.scalars(
         select(Partner).where(
+            Partner.tenant_id == tenant_id,
             Partner.is_supplier.is_(True),
             Partner.is_active.is_(True),
         )
@@ -95,7 +96,7 @@ def match_supplier(db, supplier_data):
     }
 
 
-def check_duplicate(db, partner_id, supplier_reference):
+def check_duplicate(db, partner_id, supplier_reference, tenant_id):
     """Doppelte Eingangsrechnungen desselben Lieferanten erkennen."""
 
     if not partner_id or not str(supplier_reference or "").strip():
@@ -109,6 +110,7 @@ def check_duplicate(db, partner_id, supplier_reference):
 
     existing = db.scalars(
         select(Invoice).where(
+            Invoice.tenant_id == tenant_id,
             Invoice.invoice_type == "incoming",
             Invoice.partner_id == partner_id,
             Invoice.supplier_reference == reference,
@@ -125,7 +127,7 @@ def check_duplicate(db, partner_id, supplier_reference):
     }
 
 
-def select_supplier(db, partner_id, supplier_reference):
+def select_supplier(db, partner_id, supplier_reference, tenant_id):
     """Manuell ausgewählten Lieferanten prüfen und Dubletten suchen."""
 
     try:
@@ -133,7 +135,7 @@ def select_supplier(db, partner_id, supplier_reference):
     except (TypeError, ValueError) as exc:
         raise ValueError("Ungültige Lieferanten-ID.") from exc
 
-    partner = db.get(Partner, partner_id)
+    partner = db.scalar(select(Partner).where(Partner.id == partner_id, Partner.tenant_id == tenant_id))
 
     if partner is None:
         raise ValueError("Lieferant nicht gefunden.")
@@ -152,6 +154,7 @@ def select_supplier(db, partner_id, supplier_reference):
         db,
         partner.id,
         supplier_reference,
+        tenant_id,
     )
 
     return {

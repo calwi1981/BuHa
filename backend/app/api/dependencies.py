@@ -52,3 +52,95 @@ def require_admin(
 
 
 AdminUser = Annotated[User, Depends(require_admin)]
+
+
+# BUHA V1.2.0: Mandantenbezogene Zugriffskontrolle
+from dataclasses import dataclass
+from app.services.tenant_access import require_tenant_access
+
+
+@dataclass(frozen=True)
+class ActiveTenant:
+    tenant_id: int
+    user_id: int
+    role: str
+
+
+def get_tenant_context(
+    request: Request,
+    user: CurrentUser,
+    db: DatabaseSession,
+) -> ActiveTenant:
+    raw_tenant_id = request.headers.get("X-Tenant-ID")
+
+    if not raw_tenant_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Aktiver Mandant fehlt.",
+        )
+
+    try:
+        tenant_id = int(raw_tenant_id)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Ungueltige Mandanten-ID.",
+        )
+
+    if tenant_id <= 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Ungueltige Mandanten-ID.",
+        )
+
+    membership = require_tenant_access(db, user, tenant_id)
+
+    return ActiveTenant(
+        tenant_id=tenant_id,
+        user_id=user.id,
+        role=membership.role,
+    )
+
+
+TenantContext = Annotated[ActiveTenant, Depends(get_tenant_context)]
+
+
+def require_tenant_user(
+    context: TenantContext,
+) -> ActiveTenant:
+    return context
+
+
+TenantUser = Annotated[ActiveTenant, Depends(require_tenant_user)]
+
+
+def require_tenant_admin(
+    context: TenantContext,
+) -> ActiveTenant:
+    if context.role != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Mandantenadministratorrechte erforderlich.",
+        )
+
+    return context
+
+
+TenantAdmin = Annotated[ActiveTenant, Depends(require_tenant_admin)]
+
+
+
+# BUHA V1.2.0: Ausschliesslich globale Systemadministration
+def require_system_admin(
+    user: CurrentUser,
+) -> User:
+    if user.role != UserRole.SYSTEM_ADMIN:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Systemadministratorrechte erforderlich.",
+        )
+
+    return user
+
+
+SystemAdmin = Annotated[User, Depends(require_system_admin)]

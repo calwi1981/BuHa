@@ -68,7 +68,7 @@ def _finish_log(db, log_id, status, error=None):
     db.commit()
 
 
-def deliver_invoice_email(db, invoice_id, delivery_type="manual", force_xrechnung=False):
+def deliver_invoice_email(db, invoice_id, tenant_id: int, delivery_type="manual", force_xrechnung=False):
     """Send a finalized outgoing invoice and persist delivery status.
 
     Returns a result dictionary. SMTP errors do not undo invoice
@@ -78,7 +78,15 @@ def deliver_invoice_email(db, invoice_id, delivery_type="manual", force_xrechnun
     if delivery_type not in {"manual", "automatic"}:
         raise ValueError("Ungültige Versandart.")
 
-    invoice = db.get(Invoice, invoice_id)
+    if not isinstance(tenant_id, int) or tenant_id <= 0:
+        raise ValueError("Gueltige Mandanten-ID erforderlich.")
+
+    invoice = db.scalar(
+        select(Invoice).where(
+            Invoice.id == invoice_id,
+            Invoice.tenant_id == tenant_id,
+        )
+    )
 
     if invoice is None:
         raise ValueError("Rechnung nicht gefunden.")
@@ -89,8 +97,16 @@ def deliver_invoice_email(db, invoice_id, delivery_type="manual", force_xrechnun
     if invoice.status == "draft":
         raise ValueError("Rechnungsentwurf ist nicht freigegeben.")
 
-    partner = db.get(Partner, invoice.partner_id)
-    settings = load_settings(db)
+    partner = db.scalar(
+        select(Partner).where(
+            Partner.id == invoice.partner_id,
+            Partner.tenant_id == tenant_id,
+        )
+    )
+    if partner is None:
+        raise ValueError("Geschaeftspartner nicht gefunden.")
+
+    settings = load_settings(db, tenant_id)
 
     recipient = str(
         getattr(partner, "email", None) or ""
@@ -130,7 +146,10 @@ def deliver_invoice_email(db, invoice_id, delivery_type="manual", force_xrechnun
     # kein Dokument hinzugefuegt oder geloescht werden.
     db.execute(
         select(Invoice.id)
-        .where(Invoice.id == invoice.id)
+        .where(
+            Invoice.id == invoice.id,
+            Invoice.tenant_id == tenant_id,
+        )
         .with_for_update()
     ).scalar_one()
 
@@ -167,7 +186,11 @@ def deliver_invoice_email(db, invoice_id, delivery_type="manual", force_xrechnun
         ).all()
 
         row = db.execute(
-            text("SELECT logo FROM company_settings WHERE id=1")
+            text(
+                "SELECT logo FROM company_settings "
+                "WHERE tenant_id=:tenant_id"
+            ),
+            {"tenant_id": tenant_id},
         ).first()
 
         logo = bytes(row[0]) if row and row[0] else None
@@ -276,16 +299,25 @@ def deliver_invoice_email(db, invoice_id, delivery_type="manual", force_xrechnun
         }
 
 
-def invoice_email_history(db, invoice_id):
+def invoice_email_history(db, invoice_id, tenant_id: int):
+    if not isinstance(tenant_id, int) or tenant_id <= 0:
+        raise ValueError("Gueltige Mandanten-ID erforderlich.")
+
     rows = db.execute(
         text("""
-            SELECT id, recipient, subject, delivery_type,
-                   status, error_message, created_at, completed_at
-            FROM invoice_email_deliveries
-            WHERE invoice_id=:invoice_id
-            ORDER BY created_at DESC, id DESC
+            SELECT d.id, d.recipient, d.subject, d.delivery_type,
+                   d.status, d.error_message,
+                   d.created_at, d.completed_at
+            FROM invoice_email_deliveries AS d
+            JOIN invoices AS i ON i.id = d.invoice_id
+            WHERE d.invoice_id = :invoice_id
+              AND i.tenant_id = :tenant_id
+            ORDER BY d.created_at DESC, d.id DESC
         """),
-        {"invoice_id": invoice_id},
+        {
+            "invoice_id": invoice_id,
+            "tenant_id": tenant_id,
+        },
     ).mappings().all()
 
     return [dict(row) for row in rows]

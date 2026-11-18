@@ -66,6 +66,67 @@ def _allocate_total(amount, invoice_gross, lines):
     return result
 
 
+
+def allocate_utility_payment(payment_amount, utility_difference, lines):
+    """Verteilt eine gebuchte Nebenkosten-Differenz auf Positionen.
+
+    Positive Werte sind Nachzahlungen, negative Werte Auszahlungen.
+    Nullsaldo-Ausgleiche erzeugen keine Journalposition.
+    """
+    amount = money(payment_amount)
+    difference = money(utility_difference)
+
+    if difference == 0:
+        if amount != 0:
+            raise ValueError("Nullsaldo erlaubt keine Geldbewegung.")
+        return []
+
+    if amount == 0:
+        raise ValueError("Zahlungsbetrag darf nicht null sein.")
+
+    if (amount > 0) != (difference > 0):
+        raise ValueError("Zahlungsrichtung stimmt nicht ueberein.")
+
+    if abs(amount) > abs(difference):
+        raise ValueError("Zahlung uebersteigt Nebenkostendifferenz.")
+
+    if not lines:
+        raise ValueError("Nebenkostenabrechnung hat keine Positionen.")
+
+    gross_values = [money(line.gross_total) for line in lines]
+    gross_total = money(sum(gross_values, Decimal("0")))
+
+    if gross_total <= 0:
+        raise ValueError("Nebenkosten-Gesamtkosten ungueltig.")
+
+    result = []
+    allocated = Decimal("0")
+
+    for index, line in enumerate(lines):
+        if index == len(lines) - 1:
+            gross = money(amount - allocated)
+        else:
+            gross = money(amount * gross_values[index] / gross_total)
+
+        allocated += gross
+
+        result.append({
+            "account_id": line.account_id,
+            "description": line.description,
+            "vat_rate": line.vat_rate,
+            "net": gross,
+            "vat": Decimal("0.00"),
+            "gross": gross,
+        })
+
+    if money(sum(
+        (row["gross"] for row in result), Decimal("0")
+    )) != amount:
+        raise ValueError("Nebenkostenverteilung nicht ausgeglichen.")
+
+    return result
+
+
 def allocate_payment(payment_amount, invoice_gross, lines, previously_paid=0):
     payment_amount = money(payment_amount)
     previously_paid = money(previously_paid)

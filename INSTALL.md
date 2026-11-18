@@ -125,3 +125,40 @@ Kommerzielle Verwertung der Software erfordert eine
 vorherige schriftliche Genehmigung.
 
 Vollstaendige Bedingungen: LICENSE.md
+
+
+## Hinweise zur Aktualisierung auf v1.2.0
+
+Version 1.2.0 fuehrt eine mandantenbezogene Datenstruktur
+und neue Buchhaltungsfunktionen ein.
+
+Vor der Aktualisierung:
+
+1. Vollstaendige PostgreSQL-Datensicherung erstellen.
+2. Bestehende Konfiguration und Dateispeicher sichern.
+3. Anwendungsversion und Datenbank-Migrationsstand pruefen.
+4. Sicherstellen, dass die Migrationen vollstaendig vorliegen.
+
+Die neuen Migrationen reichen von 0020 bis 0026.
+Sie muessen in der vorgesehenen Reihenfolge angewendet werden.
+
+Fuer die oeffentliche Installation gelten die oben
+beschriebenen Docker-Compose-Befehle.
+
+Bestehende individuell konfigurierte Serverinstallationen
+muessen anhand ihrer tatsaechlichen Compose-Konfiguration
+aktualisiert werden.
+
+Nach der Aktualisierung pruefen:
+
+- Anwendung startet fehlerfrei.
+- Anmeldung und Mandantenauswahl funktionieren.
+- Mandantenbezogene Daten sind korrekt getrennt.
+- Zahlungskonten und Anfangssalden werden korrekt angezeigt.
+- Buchungen und Umbuchungen funktionieren.
+- Rechnungsstellung und PDF-Erzeugung funktionieren.
+- Nebenkostenabrechnung und EÜR sind verfuegbar.
+- XRechnung-Funktionen arbeiten mit dem konfigurierten Validator.
+
+Die Datenbank darf nicht durch eine Neuinitialisierung
+bestehender produktiver Daten ersetzt werden.
